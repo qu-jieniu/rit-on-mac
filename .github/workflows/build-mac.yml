@@ -21,12 +21,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Wineskin
+      - name: Install Wineskin Winery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          brew install --cask gcenx/wine/wineskin
-          # The --no-quarantine flag was removed from Homebrew; drop the xattr ourselves
-          # so any helper binaries inside Wineskin Winery work on the runner.
+          set -euo pipefail
+          # gcenx moved the cask between taps a few times. Try the known
+          # locations, then fall back to downloading the release directly.
+          if brew install --cask gcenx/wineskin/wineskin 2>/dev/null; then
+            echo "Installed Wineskin via gcenx/wineskin tap"
+          elif brew install --cask gcenx/wine/wineskin 2>/dev/null; then
+            echo "Installed Wineskin via legacy gcenx/wine tap"
+          else
+            echo "Tap installs failed; downloading the release directly."
+            ASSET_URL=$(gh release view --repo Gcenx/WineskinServer \
+                          --json assets --jq '.assets[] | select(.name|test("Winery";"i")) | .url' | head -1)
+            test -n "$ASSET_URL"
+            curl -fsSL "$ASSET_URL" -o /tmp/winery.zip
+            ditto -x -k --rsrc --keepParent /tmp/winery.zip /tmp/winery
+            mv /tmp/winery/*Wineskin*Winery*.app "/Applications/Wineskin Winery.app"
+          fi
+          # Drop the Gatekeeper quarantine xattr so helper binaries inside the
+          # bundle can run on the runner (used to be done by --no-quarantine).
           xattr -dr com.apple.quarantine "/Applications/Wineskin Winery.app" || true
+          ls "/Applications/Wineskin Winery.app/Contents/Resources/" | head -5
 
       # -------- Codesigning prep (only if the secrets are set) --------
       # Required GitHub Secrets to enable Developer-ID signing + notarization:
