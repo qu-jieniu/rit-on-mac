@@ -57,19 +57,32 @@ also auto-attach the DMG.
 ### Option 2: Build locally on a Mac
 
 ```sh
-# One-time install
-brew install --cask --no-quarantine gcenx/wine/wineskin
+# One-time install — just winetricks is needed
+brew install winetricks
 
 # Build
 ./build-rit-app.sh
 # → out/RIT.app and out/RIT.dmg
 ```
 
-`build-rit-app.sh` automates the Wineskin Winery flow: creates the wrapper,
-installs .NET Framework 4.8 via winetricks, downloads RIT's
-`Client.application`, **drops in the patched `http.sys`**, configures clean
-exit (`--quit-wrapper-mode 1` + `wineserver -k` post-run hook), and builds the
-compressed DMG.
+`build-rit-app.sh` is a self-contained bundle assembler that does not depend
+on Wineskin (which has been deprecated; its successor "Sikarugir Creator"
+has no command-line interface). It:
+
+1. Downloads a Gcenx `wine-staging` build for macOS
+2. Creates a fresh prefix and installs .NET Framework 4.8 via winetricks (~10 min)
+3. Downloads `Client.application` from `rit.306w.ca`
+4. Drops in the patched `http.sys`
+5. Assembles `RIT.app` as a self-contained bundle:
+   - `Contents/MacOS/RIT` (shell-script launcher with clean-exit `wineserver -k` trap)
+   - `Contents/Resources/wine/` (the bundled wine engine)
+   - `Contents/Resources/prefix/` (the WINEPREFIX)
+   - `Contents/Info.plist`
+6. Codesigns and builds a compressed DMG
+
+Apple Silicon Macs need Rosetta 2 (since the bundled wine is x86_64). End
+users get prompted to install it automatically by macOS the first time they
+launch the app.
 
 ### Signing
 
