@@ -102,6 +102,12 @@ jobs:
       # -------- The actual build --------
       - name: Build the wrapper + DMG
         env:
+          # GH_TOKEN auth raises the GitHub API rate limit; without it the
+          # script's release lookup hits 403 from anonymous calls.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pin a known-good Gcenx wine-staging tag; remove this to use the
+          # newest one available at build time.
+          WINE_RELEASE: "11.7"
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
           NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
         run: |
