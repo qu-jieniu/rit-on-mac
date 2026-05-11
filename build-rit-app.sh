@@ -131,7 +131,10 @@ else
         WINETRICKS="$(command -v winetricks)"
     fi
 
-    PATH="$WINE_DIR/bin:$PATH" "$WINETRICKS" -q --force dotnet48
+    # winetricks expects a `wine` binary on PATH; GPTK only ships `wine64`.
+    # Honor winetricks' WINE env var to point it directly at our binary.
+    WINE="$WINE" WINESERVER="$WINESERVER" PATH="$WINE_DIR/bin:$PATH" \
+        "$WINETRICKS" -q --force dotnet48
     touch "$PREFIX/.dotnet48-installed"
 fi
 
