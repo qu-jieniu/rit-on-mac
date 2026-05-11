@@ -1,6 +1,6 @@
 name: Build RIT.dmg (macOS)
 
-on:
+"on":
   workflow_dispatch:
   push:
     paths:
@@ -22,7 +22,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Wineskin
-        run: brew install --cask --no-quarantine gcenx/wine/wineskin
+        run: |
+          brew install --cask gcenx/wine/wineskin
+          # The --no-quarantine flag was removed from Homebrew; drop the xattr ourselves
+          # so any helper binaries inside Wineskin Winery work on the runner.
+          xattr -dr com.apple.quarantine "/Applications/Wineskin Winery.app" || true
 
       # -------- Codesigning prep (only if the secrets are set) --------
       # Required GitHub Secrets to enable Developer-ID signing + notarization:
@@ -34,23 +38,31 @@ jobs:
       #   NOTARY_PASSWORD        app-specific password from appleid.apple.com
       #
       # Without those, the build still runs but ad-hoc signs (no Developer-ID
-      # trust, no notarization — same as a local build with no env vars).
+      # trust, no notarization).
+      - name: Detect signing config
+        id: signing
+        env:
+          HAS_CODESIGN: ${{ secrets.CODESIGN_P12_BASE64 != '' }}
+          HAS_NOTARY:   ${{ secrets.NOTARY_APPLE_ID    != '' }}
+        run: |
+          echo "codesign=$HAS_CODESIGN" >> "$GITHUB_OUTPUT"
+          echo "notarize=$HAS_NOTARY"   >> "$GITHUB_OUTPUT"
+          echo "codesign=$HAS_CODESIGN notarize=$HAS_NOTARY"
+
       - name: Import Developer ID certificate
         id: import_cert
-        if: ${{ secrets.CODESIGN_P12_BASE64 != '' }}
+        if: steps.signing.outputs.codesign == 'true'
         env:
           P12_BASE64:   ${{ secrets.CODESIGN_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
         run: |
           set -euo pipefail
-          # Create an ephemeral keychain so the run doesn't trash the default one.
           KEYCHAIN="$RUNNER_TEMP/rit-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain  -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-          # Decode + import the .p12.
           P12_PATH="$RUNNER_TEMP/devid.p12"
           printf '%s' "$P12_BASE64" | base64 --decode > "$P12_PATH"
           security import "$P12_PATH" \
@@ -59,21 +71,19 @@ jobs:
             -T /usr/bin/codesign -T /usr/bin/security
           rm -f "$P12_PATH"
 
-          # Let codesign use the imported key non-interactively.
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 
           # Put our keychain at the head of the search list so codesign finds it.
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          OTHER_KEYCHAINS=$(security list-keychains -d user | tr -d '"' | xargs)
+          security list-keychains -d user -s "$KEYCHAIN" $OTHER_KEYCHAINS
 
-          # Sanity check.
           security find-identity -p codesigning -v "$KEYCHAIN"
-
           echo "keychain=$KEYCHAIN" >> "$GITHUB_OUTPUT"
 
       - name: Store notarytool credentials
-        if: ${{ secrets.NOTARY_APPLE_ID != '' }}
+        if: steps.signing.outputs.notarize == 'true'
         env:
           APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           TEAM_ID:  ${{ secrets.NOTARY_TEAM_ID }}
@@ -88,7 +98,7 @@ jobs:
       - name: Build the wrapper + DMG
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
-          NOTARY_PROFILE:    ${{ secrets.NOTARY_APPLE_ID != '' && 'rit-notary' || '' }}
+          NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
         run: |
           chmod +x ./build-rit-app.sh
           ./build-rit-app.sh
