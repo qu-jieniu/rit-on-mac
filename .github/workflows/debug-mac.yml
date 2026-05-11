@@ -1,31 +1,30 @@
-name: Debug session on macOS runner (VNC + SSH)
+name: Debug shell on macOS runner
 
-# Manual-only. The job spins up macos-latest, builds RIT.app, starts the
-# macOS built-in Screen Sharing (VNC) server on :5900, and opens a tmate
-# SSH session you can attach to. From your local machine you connect with:
+# Manual-trigger workflow that builds RIT.app and then opens a tmate SSH
+# session into the runner. Use this when you want to poke at the build
+# environment, test what the .app does on launch, or run curl probes
+# against http://127.0.0.1:9999 inside the runner.
 #
-#   ssh -L 5900:localhost:5900 <tmate user>@<tmate host>
-#
-# (the exact ssh command is printed in the runner log when tmate starts.)
-#
-# Then open a VNC client and connect to localhost:5900 with username 'runner'
-# and the password printed by the workflow. The tmate session keeps the runner
-# alive for up to 6 hours (GitHub's hard job cap) or until you press
-# `touch ~/continue` inside it.
+# NB: this is a TERMINAL session only. Earlier versions of this workflow
+# tried to expose macOS Screen Sharing for VNC; that does not work on
+# GitHub Actions runners because the macOS TCC database doesn't grant
+# the Screen-Capture entitlement to anything (only the human-at-the-Mac
+# can flip that, or MDM). The daemon binds the port but won't actually
+# stream a screen. Don't ship that lie.
 
 "on":
   workflow_dispatch:
     inputs:
       do_build:
-        description: "Re-build RIT.app before opening the session"
+        description: "Build RIT.app before opening the session (default: yes)"
         required: false
         default: "true"
 
 jobs:
   debug:
-    name: Mac runner debug session
+    name: tmate shell on macOS
     runs-on: macos-latest
-    timeout-minutes: 300   # max 5 hours; GitHub kills at 6 anyway
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -48,73 +47,14 @@ jobs:
         if: ${{ inputs.do_build == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SKIP_CODESIGN: "1"   # save time during a debug session
+          SKIP_CODESIGN: "1"
         run: |
           chmod +x ./build-rit-app.sh
           ./build-rit-app.sh
           ls -la out/
 
-      - name: Enable Screen Sharing (VNC) on :5900
-        env:
-          VNC_PASSWORD: ${{ github.run_id }}-rit   # ephemeral, only valid this run
-        run: |
-          set -euo pipefail
-          echo "::add-mask::$VNC_PASSWORD"
-
-          # 1. Reset the 'runner' account password without needing the old one
-          #    (sysadminctl, run as root, can do this; dscl cannot).
-          sudo sysadminctl -resetPasswordFor runner -newPassword "$VNC_PASSWORD" 2>&1 \
-            || echo "(sysadminctl reset failed — will rely on legacy VNC password)"
-
-          # 2. Turn on Screen Sharing + legacy VNC password.
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-                        -setvncpw -vncpw "$VNC_PASSWORD" \
-            -restart -agent -privs -all
-
-          # 3. Best-effort load the service. On modern macOS the daemon should
-          #    already be activated by kickstart; this is belt-and-braces.
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-
-          # 4. TCC (Privacy & Security) controls screen-capture access; without
-          #    explicit grants VNC clients see a black screen. Try to pre-grant
-          #    the ARD agent and Screen Sharing daemon. This may no-op silently
-          #    on macOS 13+ where the TCC.db is heavily protected.
-          for daemon in \
-              "/System/Library/CoreServices/RemoteManagement/ARDAgent.app" \
-              "/System/Library/CoreServices/Screen Sharing.app"; do
-            sudo tccutil reset ScreenCapture "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$daemon/Contents/Info.plist" 2>/dev/null)" 2>/dev/null || true
-          done
-
-          # 5. Sanity check.
-          netstat -an | grep -E 'LISTEN.*:5900' || echo "(nothing on :5900 yet, that's OK)"
-
-          cat <<EOF
-
-          ==========================================================
-            VNC ready on the runner (or as ready as Actions allows).
-              user:     runner
-              password: $VNC_PASSWORD
-              port:     5900
-
-            Next step: a tmate session opens below; copy its 'ssh …'
-            line, then on your local machine run:
-
-              ssh -L 5900:localhost:5900 <tmate-user>@<tmate-host>
-
-            and connect your VNC client to localhost:5900
-            (macOS: 'open vnc://localhost:5900')
-
-            If you see a black screen: TCC didn't grant screen
-            capture. Use the tmate shell instead — open RIT.app
-            with 'open out/RIT.app' and inspect via terminal.
-          ==========================================================
-          EOF
-
-      - name: Open tmate SSH session
+      - name: Open tmate session
         uses: mxschmitt/action-tmate@v3
         with:
-          limit-access-to-actor: true       # only your GitHub account can attach
-          detached: false                   # keep the job alive while you're in
+          limit-access-to-actor: true
+          detached: false
