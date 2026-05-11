@@ -79,17 +79,28 @@ if [[ ! -f "$WINE_TARBALL" ]]; then
 fi
 
 WINE_DIR="$WORK/wine"
-if [[ ! -x "$WINE_DIR/bin/wine64" ]]; then
+if [[ ! -x "$WINE_DIR/bin/wine" ]]; then
     rm -rf "$WINE_DIR"
-    mkdir -p "$WINE_DIR"
     echo "==> Extracting wine engine"
-    tar -xJf "$WINE_TARBALL" -C "$WINE_DIR" --strip-components=1
+    # Gcenx ships wine as a full .app bundle. Find the engine subdir inside it
+    # ("X.app/Contents/Resources/wine") and lift it to $WINE_DIR.
+    EX="$WORK/extract"
+    rm -rf "$EX"; mkdir -p "$EX"
+    tar -xJf "$WINE_TARBALL" -C "$EX"
+    INNER=$(find "$EX" -type d -path '*Contents/Resources/wine' -maxdepth 5 | head -1)
+    [[ -n "$INNER" ]] || { echo "Couldn't locate wine engine inside tarball:"; tar -tJf "$WINE_TARBALL" | head -5; exit 1; }
+    mv "$INNER" "$WINE_DIR"
+    rm -rf "$EX"
 fi
 xattr -dr com.apple.quarantine "$WINE_DIR" 2>/dev/null || true
 
-WINE64="$WINE_DIR/bin/wine64"
+# Wine 9+ unified the wine/wine64 binary; older builds had separate wine64.
+if   [[ -x "$WINE_DIR/bin/wine" ]];   then WINE="$WINE_DIR/bin/wine"
+elif [[ -x "$WINE_DIR/bin/wine64" ]]; then WINE="$WINE_DIR/bin/wine64"
+else echo "no wine binary in $WINE_DIR/bin"; ls "$WINE_DIR/bin" || true; exit 1; fi
 WINESERVER="$WINE_DIR/bin/wineserver"
-[[ -x "$WINE64" ]] || { echo "wine64 not found at $WINE64"; ls "$WINE_DIR/bin" || true; exit 1; }
+[[ -x "$WINESERVER" ]] || { echo "wineserver missing from $WINE_DIR/bin"; exit 1; }
+echo "    wine: $WINE"
 
 # ---------- 2. Wine prefix ----------
 PREFIX="$WORK/prefix"
@@ -102,7 +113,7 @@ else
     export WINEARCH=win64
     export WINEDEBUG=-all
 
-    "$WINE64" wineboot --init
+    "$WINE" wineboot --init
     "$WINESERVER" -w
 
     # winetricks: download from upstream if not on PATH
@@ -156,10 +167,14 @@ export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
 export PATH="$APP_RES/wine/bin:$PATH"
 export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+# Wine 9+ has a unified `wine` binary; older builds split into wine/wine64.
+if   [ -x "$APP_RES/wine/bin/wine" ];   then WINEBIN="$APP_RES/wine/bin/wine"
+elif [ -x "$APP_RES/wine/bin/wine64" ]; then WINEBIN="$APP_RES/wine/bin/wine64"
+else echo "No wine binary in $APP_RES/wine/bin" >&2; exit 1; fi
 # Recreate dosdevices if we stripped them at build time.
 [ -d "$WINEPREFIX/dosdevices" ] || "$APP_RES/wine/bin/wineboot" --update
 trap '"$APP_RES/wine/bin/wineserver" -k 2>/dev/null || true' EXIT
-exec "$APP_RES/wine/bin/wine64" start /unix "$WINEPREFIX/drive_c/Client.application"
+exec "$WINEBIN" start /unix "$WINEPREFIX/drive_c/Client.application"
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
