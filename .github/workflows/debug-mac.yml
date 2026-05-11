@@ -59,9 +59,14 @@ jobs:
           VNC_PASSWORD: ${{ github.run_id }}-rit   # ephemeral, only valid this run
         run: |
           set -euo pipefail
-          # macOS Screen Sharing supports a "legacy" VNC password mode. Set
-          # that so a plain VNC client (no Apple ID auth, no Mac-only client)
-          # can connect.
+          echo "::add-mask::$VNC_PASSWORD"
+
+          # 1. Reset the 'runner' account password without needing the old one
+          #    (sysadminctl, run as root, can do this; dscl cannot).
+          sudo sysadminctl -resetPasswordFor runner -newPassword "$VNC_PASSWORD" 2>&1 \
+            || echo "(sysadminctl reset failed — will rely on legacy VNC password)"
+
+          # 2. Turn on Screen Sharing + legacy VNC password.
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
@@ -69,28 +74,44 @@ jobs:
                         -setvncpw -vncpw "$VNC_PASSWORD" \
             -restart -agent -privs -all
 
-          # Also let the 'runner' account log in as a normal Mac user (Screen
-          # Sharing authenticates against macOS user accounts when not using
-          # the legacy VNC password — we set both so either path works).
-          sudo dscl . -passwd /Users/runner "$VNC_PASSWORD"
+          # 3. Best-effort load the service. On modern macOS the daemon should
+          #    already be activated by kickstart; this is belt-and-braces.
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
-          # Make sure the service is up.
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+          # 4. TCC (Privacy & Security) controls screen-capture access; without
+          #    explicit grants VNC clients see a black screen. Try to pre-grant
+          #    the ARD agent and Screen Sharing daemon. This may no-op silently
+          #    on macOS 13+ where the TCC.db is heavily protected.
+          for daemon in \
+              "/System/Library/CoreServices/RemoteManagement/ARDAgent.app" \
+              "/System/Library/CoreServices/Screen Sharing.app"; do
+            sudo tccutil reset ScreenCapture "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$daemon/Contents/Info.plist" 2>/dev/null)" 2>/dev/null || true
+          done
 
-          echo "::add-mask::$VNC_PASSWORD"
-          echo
-          echo "=========================================================="
-          echo " VNC ready on the runner."
-          echo "   user:     runner"
-          echo "   password: ${VNC_PASSWORD}"
-          echo
-          echo " Next step: a tmate session opens; copy its 'ssh ...' line,"
-          echo " then on your local machine run:"
-          echo
-          echo "   ssh -L 5900:localhost:5900 <tmate-ssh-line>"
-          echo
-          echo " and point a VNC client at localhost:5900"
-          echo "=========================================================="
+          # 5. Sanity check.
+          netstat -an | grep -E 'LISTEN.*:5900' || echo "(nothing on :5900 yet, that's OK)"
+
+          cat <<EOF
+
+          ==========================================================
+            VNC ready on the runner (or as ready as Actions allows).
+              user:     runner
+              password: $VNC_PASSWORD
+              port:     5900
+
+            Next step: a tmate session opens below; copy its 'ssh …'
+            line, then on your local machine run:
+
+              ssh -L 5900:localhost:5900 <tmate-user>@<tmate-host>
+
+            and connect your VNC client to localhost:5900
+            (macOS: 'open vnc://localhost:5900')
+
+            If you see a black screen: TCC didn't grant screen
+            capture. Use the tmate shell instead — open RIT.app
+            with 'open out/RIT.app' and inspect via terminal.
+          ==========================================================
+          EOF
 
       - name: Open tmate SSH session
         uses: mxschmitt/action-tmate@v3
