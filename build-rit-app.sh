@@ -163,6 +163,36 @@ cp -R "$PREFIX"    "$WRAPPER/Contents/Resources/prefix"
 # may otherwise point at the builder's home directory.
 rm -rf "$WRAPPER/Contents/Resources/prefix/dosdevices"
 
+# ---------- 4a. Slim the bundle ----------
+# Three safe trims, no behavioral change:
+#   - strip debug symbols off Wine binaries
+#   - remove Wine Mono (unused — winetricks installed Microsoft .NET 4.8 instead)
+#   - remove Wine Gecko (unused — RIT has no WebBrowser controls)
+#     ^ moderate risk if RIT ever pops an embedded-HTML dialog. Remove this
+#       line if you hit any "Wine wants to install Gecko" prompt at runtime.
+echo "==> Slimming bundle"
+WRAPPER_WINE="$WRAPPER/Contents/Resources/wine"
+WRAPPER_PFX="$WRAPPER/Contents/Resources/prefix"
+
+# Strip debug symbols from all Wine binaries
+find "$WRAPPER_WINE/bin" -type f -perm +111 -exec strip -S {} \; 2>/dev/null || true
+find "$WRAPPER_WINE/lib" -type f \( -name '*.dylib' -o -name '*.so' \) \
+     -exec strip -S {} \; 2>/dev/null || true
+
+# Wine Mono lives in two places: the bundled engine and the populated prefix
+rm -rf "$WRAPPER_WINE/share/wine/mono" \
+       "$WRAPPER_PFX/drive_c/windows/Microsoft.NET/assembly/Wine-Mono" 2>/dev/null || true
+
+# Wine Gecko — likewise
+rm -rf "$WRAPPER_WINE/share/wine/gecko" \
+       "$WRAPPER_PFX/drive_c/windows/system32/gecko" \
+       "$WRAPPER_PFX/drive_c/windows/syswow64/gecko" 2>/dev/null || true
+
+# Wine's bundled docs/man/info pages are pointless in a shipped bundle
+rm -rf "$WRAPPER_WINE/share/man" "$WRAPPER_WINE/share/info" "$WRAPPER_WINE/share/doc" 2>/dev/null || true
+
+echo "    bundle size after slim: $(du -sh "$WRAPPER" | cut -f1)"
+
 # Launcher.
 cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
 #!/bin/bash
@@ -215,9 +245,11 @@ if [[ "${SKIP_CODESIGN:-}" != "1" ]]; then
 fi
 
 # ---------- 6. DMG ----------
-echo "==> Building $DMG"
+echo "==> Building $DMG (bzip2-compressed)"
 rm -f "$DMG"
-hdiutil create -volname "RIT" -srcfolder "$WRAPPER" -ov -format UDZO "$DMG"
+# UDBZ (bzip2) typically yields a 10-20% smaller DMG than UDZO (zlib) at the
+# cost of slower decompression — acceptable for a one-shot install.
+hdiutil create -volname "RIT" -srcfolder "$WRAPPER" -ov -format UDBZ "$DMG"
 
 # ---------- 7. Notarize ----------
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
