@@ -14,9 +14,7 @@ name: Build RIT.dmg (macOS)
 jobs:
   build:
     name: Build RIT.app + RIT.dmg
-    runs-on: macos-latest   # Apple Silicon (arm64), free on public repos
-    env:
-      WINE_BUILD: wine-staging   # or wine-devel
+    runs-on: macos-latest   # Apple Silicon (arm64); GPTK runs natively here
 
     steps:
       - uses: actions/checkout@v4
@@ -28,10 +26,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            .work/wine-staging-*.tar.xz
+            .work/*.tar.xz
             .work/wine
             .work/prefix
-          key: build-${{ runner.os }}-${{ env.WINE_BUILD }}-${{ hashFiles('http.sys') }}
+          key: build-${{ runner.os }}-gptk-${{ hashFiles('http.sys') }}
 
       # -------- Codesigning prep (only if the secrets are set) --------
       # Required GitHub Secrets to enable Developer-ID signing + notarization:
@@ -105,9 +103,6 @@ jobs:
           # GH_TOKEN auth raises the GitHub API rate limit; without it the
           # script's release lookup hits 403 from anonymous calls.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pin a known-good Gcenx wine-staging tag; remove this to use the
-          # newest one available at build time.
-          WINE_RELEASE: "11.7"
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
           NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
         run: |

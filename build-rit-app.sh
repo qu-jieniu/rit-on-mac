@@ -15,8 +15,10 @@
 #   7. Builds RIT.dmg
 #
 # Inputs (env, optional):
-#   WINE_RELEASE        tag in Gcenx/macOS_Wine_builds (e.g. "11.7"); defaults to latest
-#   WINE_BUILD          "wine-staging" (default) or "wine-devel"
+#   WINE_URL            direct URL to a wine engine .tar.xz. Default: latest GPTK
+#                       (Apple's Game Porting Toolkit — arm64-native, no Rosetta).
+#                       For Intel Macs / fallback, point at one of the Gcenx
+#                       macOS_Wine_builds wine-staging-NN-osx64.tar.xz URLs.
 #   CLIENT_URL          where to fetch Client.application; default is rit.306w.ca
 #   CODESIGN_IDENTITY   "Developer ID Application: …" — set for real signing
 #   SKIP_CODESIGN       set =1 to skip codesign entirely
@@ -33,7 +35,6 @@ OUT="$HERE/out"
 WORK="$HERE/.work"
 WRAPPER="$OUT/RIT.app"
 DMG="$OUT/RIT.dmg"
-WINE_BUILD="${WINE_BUILD:-wine-staging}"
 CLIENT_URL="${CLIENT_URL:-http://rit.306w.ca/client/Client.application}"
 
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -49,33 +50,36 @@ fi
 mkdir -p "$OUT" "$WORK"
 
 # ---------- 1. Wine engine ----------
-echo "==> Locating Gcenx wine release"
-if [[ -z "${WINE_RELEASE:-}" ]]; then
-    WINE_RELEASE=$(curl -fsSL \
+# Default: Apple's Game Porting Toolkit. It's arm64-native, so no Rosetta is
+# needed (and Wine on Rosetta hits "unsupported privilege level: 0" errors
+# during heavy operations like winetricks dotnet48). Override WINE_URL to
+# pick a different engine (e.g., wine-staging for Intel-only builds).
+if [[ -z "${WINE_URL:-}" ]]; then
+    echo "==> Locating latest Game Porting Toolkit release"
+    WINE_URL=$(curl -fsSL \
         ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} \
         -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/Gcenx/macOS_Wine_builds/releases?per_page=10" \
+        "https://api.github.com/repos/Gcenx/game-porting-toolkit/releases?per_page=5" \
       | python3 -c "
-import json, re, sys
+import json, sys
 data = json.load(sys.stdin)
 for rel in data:
     for asset in rel.get('assets', []):
-        if re.search(r'^${WINE_BUILD}-.*-osx64\.tar\.xz\$', asset['name']):
-            print(rel['tag_name']); sys.exit(0)
+        if asset['name'].endswith('.tar.xz') and 'game-porting-toolkit' in asset['name'].lower():
+            print(asset['browser_download_url']); sys.exit(0)
 ")
-    [[ -n "$WINE_RELEASE" ]] || { echo "Couldn't find a $WINE_BUILD release"; exit 1; }
+    [[ -n "$WINE_URL" ]] || { echo "Couldn't find a GPTK release"; exit 1; }
 fi
-ASSET="${WINE_BUILD}-${WINE_RELEASE}-osx64.tar.xz"
-echo "    release: $WINE_RELEASE  asset: $ASSET"
+echo "    engine URL: $WINE_URL"
 
+ASSET="$(basename "$WINE_URL")"
 WINE_TARBALL="$WORK/$ASSET"
 if [[ ! -f "$WINE_TARBALL" ]]; then
     echo "==> Downloading $ASSET"
     curl -fsSL \
         -H "Accept: application/octet-stream" \
         ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} \
-        "https://github.com/Gcenx/macOS_Wine_builds/releases/download/${WINE_RELEASE}/${ASSET}" \
-        -o "$WINE_TARBALL"
+        "$WINE_URL" -o "$WINE_TARBALL"
 fi
 
 WINE_DIR="$WORK/wine"
