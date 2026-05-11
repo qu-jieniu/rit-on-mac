@@ -1,0 +1,45 @@
+name: Build RIT.dmg (macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - mac-pack/**
+      - .github/workflows/build-mac.yml
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build RIT.app + RIT.dmg
+    runs-on: macos-latest   # Apple Silicon (arm64), free for public repos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Wineskin
+        run: brew install --cask --no-quarantine gcenx/wine/wineskin
+
+      - name: Build the wrapper + DMG
+        env:
+          # Uncomment to sign + notarize. Add corresponding GitHub Secrets.
+          # CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          # NOTARY_PROFILE:    ${{ secrets.NOTARY_PROFILE }}
+          WS_ENGINE: WS11WineCX64Bit24.0.0
+        run: |
+          cd mac-pack
+          ./build-rit-app.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RIT-${{ github.sha }}
+          path: mac-pack/out/RIT.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to GitHub release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mac-pack/out/RIT.dmg
