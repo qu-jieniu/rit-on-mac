@@ -183,10 +183,10 @@ find "$WRAPPER_WINE/lib" -type f \( -name '*.dylib' -o -name '*.so' \) \
 rm -rf "$WRAPPER_WINE/share/wine/mono" \
        "$WRAPPER_PFX/drive_c/windows/Microsoft.NET/assembly/Wine-Mono" 2>/dev/null || true
 
-# Wine Gecko — likewise
-rm -rf "$WRAPPER_WINE/share/wine/gecko" \
-       "$WRAPPER_PFX/drive_c/windows/system32/gecko" \
-       "$WRAPPER_PFX/drive_c/windows/syswow64/gecko" 2>/dev/null || true
+# Wine Gecko — KEEP. Removing it breaks .NET 4.8 ClickOnce launchers like
+# RIT's Client.application with "This application could not be started"
+# at first launch; the trust-prompt UI loads mshtml.dll from Gecko.
+# (Saves ~80 MB if removed; not worth the broken install.)
 
 # Wine's bundled docs/man/info pages are pointless in a shipped bundle
 rm -rf "$WRAPPER_WINE/share/man" "$WRAPPER_WINE/share/info" "$WRAPPER_WINE/share/doc" 2>/dev/null || true
