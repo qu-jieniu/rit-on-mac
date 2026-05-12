@@ -146,7 +146,19 @@ if [[ ! -f "$CLIENT_APP" ]]; then
 fi
 
 echo "==> Installing patched http.sys"
+# Drop into the prefix...
 cp "$HERE/http.sys" "$PREFIX/drive_c/windows/system32/drivers/http.sys"
+# ...AND into the wine engine's fakedll source. Without this, the launcher's
+# `wineboot --update` (which runs when dosdevices is missing — i.e., always
+# on first launch since we strip dosdevices at build time) re-copies the
+# engine's stock http.sys over our patched one and the fix is gone.
+for arch in x86_64-windows i386-windows; do
+    ENGINE_HTTPSYS="$WINE_DIR/lib/wine/$arch/http.sys"
+    if [[ -f "$ENGINE_HTTPSYS" ]]; then
+        cp "$HERE/http.sys" "$ENGINE_HTTPSYS"
+        echo "    patched engine $arch/http.sys"
+    fi
+done
 md5_pref=$(md5 -q "$PREFIX/drive_c/windows/system32/drivers/http.sys")
 md5_src=$( md5 -q "$HERE/http.sys")
 [[ "$md5_pref" = "$md5_src" ]] || { echo "http.sys deploy mismatch"; exit 1; }
