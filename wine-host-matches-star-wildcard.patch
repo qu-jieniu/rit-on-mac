@@ -1,12 +1,46 @@
+# Patch for Apple's Game Porting Toolkit (Wine 7.7 + Apple's PE-build mods).
+# Source: https://github.com/Gcenx/game-porting-toolkit (LGPL publication).
+#
+# Two bugs in dlls/http.sys/http.c::host_matches make RIT's local REST
+# listener silently drop requests:
+#
+#   1. Only '+' is recognized as a wildcard host. RIT registers '*:9999/v1/'
+#      under admin context, so no request with a real Host header ever
+#      matches.
+#
+#   2. Even when the wildcard branch fires, the strncmp() length is
+#      strlen(queue_port) - 1, which includes the URL path ('/v1/'),
+#      not just the port number. Comparing ':9999/v1/' to ':9999' fails
+#      at byte 5 ('/' vs '\0').
+#
+# Fix both: also match '*', and compute the host-comparison length up to
+# the first '/' so we only compare ':NNNN'.
+
 diff --git a/dlls/http.sys/http.c b/dlls/http.sys/http.c
+index 523c70e..c4f5abd 100644
 --- a/dlls/http.sys/http.c
 +++ b/dlls/http.sys/http.c
-@@ -385,7 +385,7 @@ static BOOL host_matches(const struct url *url, const char *conn_host)
-     if (!url->url)
-         return FALSE;
+@@ -323,13 +323,20 @@ static BOOL host_matches(const struct connection *conn, const struct request_que
+ {
+     const char *conn_host = (conn->url[0] == '/') ? conn->host : conn->url + 7;
  
--    if (url->url[7] == '+')
-+    if (url->url[7] == '+' || url->url[7] == '*')
+-    if (queue->url[7] == '+')
++    if (queue->url[7] == '+' || queue->url[7] == '*')
      {
-         const char *queue_port = strchr(url->url + 7, ':');
-         host_len = strchr(queue_port, '/') - queue_port - 1;
+         const char *queue_port = strchr(queue->url + 7, ':');
+-        return !strncmp(queue_port, strchr(conn_host, ':'), strlen(queue_port) - 1 /* strip final slash */);
++        const char *queue_slash = strchr(queue_port, '/');
++        const char *conn_port = strchr(conn_host, ':');
++        size_t host_len = queue_slash ? (size_t)(queue_slash - queue_port) : strlen(queue_port);
++        return conn_port && !strncmp(queue_port, conn_port, host_len);
+     }
+ 
+-    return !memicmp(queue->url + 7, conn_host, strlen(queue->url) - 8 /* strip final slash */);
++    {
++        const char *queue_slash = strchr(queue->url + 7, '/');
++        size_t host_len = queue_slash ? (size_t)(queue_slash - (queue->url + 7)) : strlen(queue->url + 7);
++        return !memicmp(queue->url + 7, conn_host, host_len);
++    }
+ }
+ 
+ /* Upon receiving a request, parse it to ensure that it is a valid HTTP request,
