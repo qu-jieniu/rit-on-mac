@@ -285,16 +285,31 @@ exit 0
 PREINST
 chmod +x "$PKG_SCRIPTS/preinstall"
 
-# Postinstall: strip Gatekeeper quarantine + install Rosetta on Apple Silicon
-# if it's not already there. Both steps require root (the installer runs as
-# root), which the .pkg flow gives us for free without prompting the user.
+# Postinstall: strip Gatekeeper quarantine, chown to the user (Wine refuses
+# to use a prefix not owned by the running user), and install Rosetta 2 on
+# Apple Silicon if it's not already there. All three need root, which the
+# .pkg flow gives us for free.
 cat > "$PKG_SCRIPTS/postinstall" <<'POSTINST'
 #!/bin/bash
 APP="/Applications/RIT.app"
-# 1. Strip quarantine so Gatekeeper doesn't second-guess our ad-hoc signed bundle.
+
+# 1. Strip quarantine recursively from every file in the bundle, including
+#    the engine + prefix DLLs (which inherit quarantine from the downloaded .pkg).
 /usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-# 2. On Apple Silicon, install Rosetta 2 if missing. Required because the
-#    bundled wine engine is x86_64 (Apple's GPTK).
+/usr/bin/find "$APP" -exec /usr/bin/xattr -d com.apple.quarantine {} \; 2>/dev/null
+# Also clear Gatekeeper's "where did this come from" extended attribute.
+/usr/bin/find "$APP" -exec /usr/bin/xattr -d com.apple.metadata:kMDItemWhereFroms {} \; 2>/dev/null
+
+# 2. Chown the bundle to the console user (the one who logged in / triggered
+#    the install). Wine's wineserver explicitly rejects prefixes not owned by
+#    the running UID. Default install puts everything as root:wheel.
+CONSOLE_USER=$(/usr/bin/stat -f%Su /dev/console)
+CONSOLE_GROUP=$(/usr/bin/id -gn "$CONSOLE_USER" 2>/dev/null || echo staff)
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    /usr/sbin/chown -R "${CONSOLE_USER}:${CONSOLE_GROUP}" "$APP"
+fi
+
+# 3. On Apple Silicon, install Rosetta 2 if missing.
 if [ "$(/usr/bin/uname -m)" = "arm64" ] && ! /usr/bin/pgrep -q oahd 2>/dev/null; then
     /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
 fi
