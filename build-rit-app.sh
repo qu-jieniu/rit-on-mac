@@ -234,7 +234,14 @@ exec "$WINEBIN" start "C:\\Client.application"
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
-# Info.plist.
+# Generate RIT.icns from the iconset (PNGs checked into the repo at
+# RIT.iconset/). iconutil is built into macOS.
+echo "==> Compiling icon"
+iconutil --convert icns "$HERE/RIT.iconset" -o "$WRAPPER/Contents/Resources/RIT.icns"
+
+# Info.plist. Note CFBundleIconFile + LSMinimumSystemVersion = 14 (Sonoma,
+# GPTK's floor). NSPrincipalClass is set so wine's NSApp inherits our bundle
+# context and shows the .icns in Dock.
 cat > "$WRAPPER/Contents/Info.plist" <<'EOPLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -248,10 +255,11 @@ cat > "$WRAPPER/Contents/Info.plist" <<'EOPLIST'
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundlePackageType</key>    <string>APPL</string>
     <key>CFBundleSignature</key>      <string>????</string>
-    <key>LSMinimumSystemVersion</key> <string>10.15</string>
-    <key>LSArchitecturePriority</key> <array><string>x86_64</string></array>
+    <key>CFBundleIconFile</key>       <string>RIT</string>
+    <key>LSMinimumSystemVersion</key> <string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key>       <string>NSApplication</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict>
 </plist>
 EOPLIST
