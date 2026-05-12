@@ -205,33 +205,15 @@ rm -rf "$WRAPPER_WINE/share/man" "$WRAPPER_WINE/share/info" "$WRAPPER_WINE/share
 
 echo "    bundle size after slim: $(du -sh "$WRAPPER" | cut -f1)"
 
-# Launcher.
-cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
-#!/bin/bash
-# RIT.app launcher — sets up the bundled wine environment and runs Client.application.
-HERE="$(cd "$(dirname "$0")" && pwd)"
-APP_RES="$HERE/../Resources"
-export WINEPREFIX="$APP_RES/prefix"
-export WINEARCH=win64
-export WINEDEBUG="${WINEDEBUG:--all}"
-export PATH="$APP_RES/wine/bin:$PATH"
-export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-# Wine 9+ has a unified `wine` binary; older builds split into wine/wine64.
-if   [ -x "$APP_RES/wine/bin/wine" ];   then WINEBIN="$APP_RES/wine/bin/wine"
-elif [ -x "$APP_RES/wine/bin/wine64" ]; then WINEBIN="$APP_RES/wine/bin/wine64"
-else echo "No wine binary in $APP_RES/wine/bin" >&2; exit 1; fi
-# (Rosetta install + version check + xattr quarantine are handled by the
-# .pkg installer's preinstall/postinstall scripts at install time.)
-# GPTK and some other wine engines don't ship a host-side wineboot binary.
-# Use the in-prefix wineboot.exe (via wine) for prefix init.
-if [ ! -d "$WINEPREFIX/dosdevices" ]; then
-    mkdir -p "$WINEPREFIX/dosdevices"
-    ln -sfn '../drive_c' "$WINEPREFIX/dosdevices/c:"
-    ln -sfn '/'          "$WINEPREFIX/dosdevices/z:"
-fi
-trap '"$APP_RES/wine/bin/wineserver" -k 2>/dev/null || true' EXIT
-exec "$WINEBIN" start "C:\\Client.application"
-EOSH
+# Launcher — Mach-O binary compiled from launcher.m (Objective-C / Cocoa).
+# Lets macOS treat us as a proper .app: hides the launcher's own Dock entry,
+# spawns wine64 in its own process group (clean shutdown), and gives the
+# Dock entry the RIT icon via CFBundleIconFile.
+echo "==> Compiling launcher.m"
+clang -framework Cocoa -arch arm64 -arch x86_64 \
+      -mmacosx-version-min=14.0 \
+      -o "$WRAPPER/Contents/MacOS/RIT" \
+      "$HERE/launcher.m"
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
 # Generate RIT.icns from the iconset (PNGs checked into the repo at
