@@ -34,7 +34,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
 WORK="$HERE/.work"
 WRAPPER="$OUT/RIT.app"
-DMG="$OUT/RIT.dmg"
+PKG="$OUT/RIT.pkg"
 CLIENT_URL="${CLIENT_URL:-http://rit.306w.ca/client/Client.application}"
 
 if [[ "$(uname)" != "Darwin" ]]; then
@@ -220,21 +220,8 @@ export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PAT
 if   [ -x "$APP_RES/wine/bin/wine" ];   then WINEBIN="$APP_RES/wine/bin/wine"
 elif [ -x "$APP_RES/wine/bin/wine64" ]; then WINEBIN="$APP_RES/wine/bin/wine64"
 else echo "No wine binary in $APP_RES/wine/bin" >&2; exit 1; fi
-# On Apple Silicon, our bundled wine is x86_64 and needs Rosetta 2. macOS
-# normally auto-prompts to install Rosetta for x86_64 .app launches, but
-# since our CFBundleExecutable is this bash script (native arm64), the
-# prompt never fires — bash silently fails to exec wine. Check up front
-# and tell the user clearly if Rosetta is missing.
-if [ "$(uname -m)" = "arm64" ] && ! pgrep -q oahd 2>/dev/null && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
-    osascript <<'OSA'
-display dialog "RIT needs Rosetta 2 to run on Apple Silicon Macs.\n\nOpen Terminal and run:\n\n    softwareupdate --install-rosetta --agree-to-license\n\nThen try opening RIT again." \
-    with title "Rosetta 2 required" \
-    buttons {"OK"} \
-    default button "OK" \
-    with icon caution
-OSA
-    exit 1
-fi
+# (Rosetta install + version check + xattr quarantine are handled by the
+# .pkg installer's preinstall/postinstall scripts at install time.)
 # GPTK and some other wine engines don't ship a host-side wineboot binary.
 # Use the in-prefix wineboot.exe (via wine) for prefix init.
 if [ ! -d "$WINEPREFIX/dosdevices" ]; then
@@ -276,21 +263,76 @@ if [[ "${SKIP_CODESIGN:-}" != "1" ]]; then
     codesign --force --deep --options runtime --sign "$IDENTITY" "$WRAPPER"
 fi
 
-# ---------- 6. DMG ----------
-echo "==> Building $DMG (bzip2-compressed)"
-rm -f "$DMG"
-# UDBZ (bzip2) typically yields a 10-20% smaller DMG than UDZO (zlib) at the
-# cost of slower decompression — acceptable for a one-shot install.
-hdiutil create -volname "RIT" -srcfolder "$WRAPPER" -ov -format UDBZ "$DMG"
+# ---------- 6. Installer package (.pkg) ----------
+# Staging: an installer expects a tree mirroring the destination layout.
+echo "==> Building $PKG"
+PKG_ROOT="$WORK/pkg-root"
+PKG_SCRIPTS="$WORK/pkg-scripts"
+rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"
+mkdir -p "$PKG_ROOT/Applications" "$PKG_SCRIPTS"
+cp -R "$WRAPPER" "$PKG_ROOT/Applications/"
+
+# Preinstall: hard-stop on macOS Ventura or older (GPTK requires Sonoma 14+).
+cat > "$PKG_SCRIPTS/preinstall" <<'PREINST'
+#!/bin/bash
+set -e
+MAJOR=$(/usr/bin/sw_vers -productVersion | cut -d. -f1)
+if [ "$MAJOR" -lt 14 ]; then
+    /usr/bin/osascript -e 'display alert "macOS update required" message "RIT requires macOS Sonoma (14) or later. Open System Settings → General → Software Update and update first." as critical' >/dev/null 2>&1 || true
+    exit 1
+fi
+exit 0
+PREINST
+chmod +x "$PKG_SCRIPTS/preinstall"
+
+# Postinstall: strip Gatekeeper quarantine + install Rosetta on Apple Silicon
+# if it's not already there. Both steps require root (the installer runs as
+# root), which the .pkg flow gives us for free without prompting the user.
+cat > "$PKG_SCRIPTS/postinstall" <<'POSTINST'
+#!/bin/bash
+APP="/Applications/RIT.app"
+# 1. Strip quarantine so Gatekeeper doesn't second-guess our ad-hoc signed bundle.
+/usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+# 2. On Apple Silicon, install Rosetta 2 if missing. Required because the
+#    bundled wine engine is x86_64 (Apple's GPTK).
+if [ "$(/usr/bin/uname -m)" = "arm64" ] && ! /usr/bin/pgrep -q oahd 2>/dev/null; then
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
+fi
+exit 0
+POSTINST
+chmod +x "$PKG_SCRIPTS/postinstall"
+
+# Build a component package (no choices, just install RIT.app).
+COMPONENT_PKG="$WORK/RIT-component.pkg"
+pkgbuild \
+    --root "$PKG_ROOT" \
+    --identifier com.rotman.rit \
+    --version "1.0" \
+    --install-location / \
+    --scripts "$PKG_SCRIPTS" \
+    "$COMPONENT_PKG"
+
+# Wrap into a product/distribution archive so we can attach the welcome /
+# license screens later if desired.
+rm -f "$PKG"
+productbuild --package "$COMPONENT_PKG" "$PKG"
+
+# Optional Developer ID Installer signing. Set INSTALLER_IDENTITY in env, e.g.
+#   export INSTALLER_IDENTITY="Developer ID Installer: Your Name (TEAMID)"
+if [[ -n "${INSTALLER_IDENTITY:-}" ]]; then
+    SIGNED="$WORK/RIT-signed.pkg"
+    productsign --sign "$INSTALLER_IDENTITY" "$PKG" "$SIGNED"
+    mv "$SIGNED" "$PKG"
+fi
 
 # ---------- 7. Notarize ----------
 if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-    echo "==> Submitting $DMG for notarization (profile: $NOTARY_PROFILE)"
-    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-    xcrun stapler staple "$DMG"
+    echo "==> Submitting $PKG for notarization (profile: $NOTARY_PROFILE)"
+    xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$PKG"
 fi
 
 echo
 echo "Built:"
 echo "  $WRAPPER"
-echo "  $DMG  ($(du -sh "$DMG" | cut -f1))"
+echo "  $PKG  ($(du -sh "$PKG" | cut -f1))"

@@ -98,12 +98,13 @@ jobs:
             --password "$PASSWORD"
 
       # -------- The actual build --------
-      - name: Build the wrapper + DMG
+      - name: Build the wrapper + pkg
         env:
           # GH_TOKEN auth raises the GitHub API rate limit; without it the
           # script's release lookup hits 403 from anonymous calls.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          INSTALLER_IDENTITY: ${{ secrets.INSTALLER_IDENTITY }}
           NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
         run: |
           chmod +x ./build-rit-app.sh
@@ -120,7 +121,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RIT-${{ github.sha }}
-          path: out/RIT.dmg
+          path: out/RIT.pkg
           if-no-files-found: error
           retention-days: 30
 
@@ -128,4 +129,4 @@ jobs:
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: out/RIT.dmg
+          files: out/RIT.pkg
