@@ -220,10 +220,15 @@ export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PAT
 if   [ -x "$APP_RES/wine/bin/wine" ];   then WINEBIN="$APP_RES/wine/bin/wine"
 elif [ -x "$APP_RES/wine/bin/wine64" ]; then WINEBIN="$APP_RES/wine/bin/wine64"
 else echo "No wine binary in $APP_RES/wine/bin" >&2; exit 1; fi
-# Recreate dosdevices if we stripped them at build time.
-[ -d "$WINEPREFIX/dosdevices" ] || "$APP_RES/wine/bin/wineboot" --update
+# GPTK and some other wine engines don't ship a host-side wineboot binary.
+# Use the in-prefix wineboot.exe (via wine) for prefix init.
+if [ ! -d "$WINEPREFIX/dosdevices" ]; then
+    mkdir -p "$WINEPREFIX/dosdevices"
+    ln -sfn '../drive_c' "$WINEPREFIX/dosdevices/c:"
+    ln -sfn '/'          "$WINEPREFIX/dosdevices/z:"
+fi
 trap '"$APP_RES/wine/bin/wineserver" -k 2>/dev/null || true' EXIT
-exec "$WINEBIN" start /unix "$WINEPREFIX/drive_c/Client.application"
+exec "$WINEBIN" start "C:\\Client.application"
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
