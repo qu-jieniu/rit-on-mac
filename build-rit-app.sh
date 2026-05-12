@@ -220,6 +220,21 @@ export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PAT
 if   [ -x "$APP_RES/wine/bin/wine" ];   then WINEBIN="$APP_RES/wine/bin/wine"
 elif [ -x "$APP_RES/wine/bin/wine64" ]; then WINEBIN="$APP_RES/wine/bin/wine64"
 else echo "No wine binary in $APP_RES/wine/bin" >&2; exit 1; fi
+# On Apple Silicon, our bundled wine is x86_64 and needs Rosetta 2. macOS
+# normally auto-prompts to install Rosetta for x86_64 .app launches, but
+# since our CFBundleExecutable is this bash script (native arm64), the
+# prompt never fires — bash silently fails to exec wine. Check up front
+# and tell the user clearly if Rosetta is missing.
+if [ "$(uname -m)" = "arm64" ] && ! pgrep -q oahd 2>/dev/null && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+    osascript <<'OSA'
+display dialog "RIT needs Rosetta 2 to run on Apple Silicon Macs.\n\nOpen Terminal and run:\n\n    softwareupdate --install-rosetta --agree-to-license\n\nThen try opening RIT again." \
+    with title "Rosetta 2 required" \
+    buttons {"OK"} \
+    default button "OK" \
+    with icon caution
+OSA
+    exit 1
+fi
 # GPTK and some other wine engines don't ship a host-side wineboot binary.
 # Use the in-prefix wineboot.exe (via wine) for prefix init.
 if [ ! -d "$WINEPREFIX/dosdevices" ]; then
