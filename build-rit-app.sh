@@ -205,15 +205,30 @@ rm -rf "$WRAPPER_WINE/share/man" "$WRAPPER_WINE/share/info" "$WRAPPER_WINE/share
 
 echo "    bundle size after slim: $(du -sh "$WRAPPER" | cut -f1)"
 
-# Launcher — Mach-O binary compiled from launcher.m (Objective-C / Cocoa).
-# Lets macOS treat us as a proper .app: hides the launcher's own Dock entry,
-# spawns wine64 in its own process group (clean shutdown), and gives the
-# Dock entry the RIT icon via CFBundleIconFile.
-echo "==> Compiling launcher.m"
-clang -framework Cocoa -arch arm64 -arch x86_64 \
-      -mmacosx-version-min=14.0 \
-      -o "$WRAPPER/Contents/MacOS/RIT" \
-      "$HERE/launcher.m"
+# Launcher — bash script (the experimental Cocoa launcher in launcher.m
+# regressed: dfsvc/ClickOnce recovery stopped working when wine was
+# spawned via posix_spawn-with-new-pgroup from an NSApp host, and we lost
+# the ability for wine to find a GUI context properly. Keep launcher.m
+# in the repo for future iteration but ship bash for now.
+cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
+#!/bin/bash
+HERE="$(cd "$(dirname "$0")" && pwd)"
+APP_RES="$HERE/../Resources"
+export WINEPREFIX="$APP_RES/prefix"
+export WINEARCH=win64
+export WINEDEBUG="${WINEDEBUG:--all}"
+export PATH="$APP_RES/wine/bin:$PATH"
+export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+WINEBIN="$APP_RES/wine/bin/wine64"
+[ -x "$WINEBIN" ] || WINEBIN="$APP_RES/wine/bin/wine"
+if [ ! -d "$WINEPREFIX/dosdevices" ]; then
+    mkdir -p "$WINEPREFIX/dosdevices"
+    ln -sfn '../drive_c' "$WINEPREFIX/dosdevices/c:"
+    ln -sfn '/'          "$WINEPREFIX/dosdevices/z:"
+fi
+trap '"$APP_RES/wine/bin/wineserver" -k 2>/dev/null || true' EXIT
+exec "$WINEBIN" start "C:\\Client.application"
+EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
 # Generate RIT.icns from the iconset (PNGs checked into the repo at
