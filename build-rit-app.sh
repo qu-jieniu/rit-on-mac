@@ -272,15 +272,33 @@ rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"
 mkdir -p "$PKG_ROOT/Applications" "$PKG_SCRIPTS"
 cp -R "$WRAPPER" "$PKG_ROOT/Applications/"
 
-# Preinstall: hard-stop on macOS Ventura or older (GPTK requires Sonoma 14+).
+# Preinstall:
+#   1. Hard-stop on macOS Ventura or older (GPTK requires Sonoma 14+).
+#   2. Kill any running RIT/wine processes so we don't try to overwrite
+#      open files.
+#   3. Remove the previous /Applications/RIT.app entirely so each install
+#      starts from a clean bundle (no leftover ClickOnce cache, no stale
+#      registry, no API key from a previous version).
 cat > "$PKG_SCRIPTS/preinstall" <<'PREINST'
 #!/bin/bash
 set -e
+
+# 1. macOS version gate.
 MAJOR=$(/usr/bin/sw_vers -productVersion | cut -d. -f1)
 if [ "$MAJOR" -lt 14 ]; then
     /usr/bin/osascript -e 'display alert "macOS update required" message "RIT requires macOS Sonoma (14) or later. Open System Settings → General → Software Update and update first." as critical' >/dev/null 2>&1 || true
     exit 1
 fi
+
+# 2. Kill any running RIT/wine processes (otherwise the rm below races with
+#    open file handles and the install partially fails).
+/usr/bin/pkill -9 -f 'RIT\.app/Contents/Resources/wine|Client\.exe|wineserver|wine64-preloader' 2>/dev/null || true
+/bin/sleep 1
+
+# 3. Wipe the previous install. Fresh every time — every student boots from
+#    the same baked-in state, no leftover settings or ClickOnce cache.
+/bin/rm -rf /Applications/RIT.app
+
 exit 0
 PREINST
 chmod +x "$PKG_SCRIPTS/preinstall"
