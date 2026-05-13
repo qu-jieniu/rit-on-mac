@@ -179,6 +179,46 @@ md5_pref=$(md5 -q "$PREFIX/drive_c/windows/system32/drivers/http.sys")
 md5_src=$( md5 -q "$HERE/http.sys")
 [[ "$md5_pref" = "$md5_src" ]] || { echo "http.sys deploy mismatch"; exit 1; }
 
+# ---------- 3.5. Pre-bake ClickOnce trust grant ----------
+# Wine's user.reg, even after .NET 4.8 + Client.application install, lacks the
+# two values dfsvc writes only after the user clicks "Install" on the trust
+# prompt:
+#     {2ad613da-…}!IsFullTrust    = "True"            (UTF-16 REG_BINARY)
+#     {c989bb7a-…}!ApplicationTrust = "<ApplicationTrust …>" XML (UTF-16 REG_BINARY)
+# Their absence on first launch makes dfsvc.exe block on an off-screen AppKit
+# dialog ("Discover" commit 42a2b8a). Bake them in here so first launch skips
+# the prompt entirely and Client.exe spawns directly.
+#
+# trust-grant.reg is captured from a known-good bundle via:
+#     ./scripts/extract_trust_grant.py path/to/user.reg > trust-grant.reg
+# It's keyed on the deployment GUIDs ({2ec93463…}_{3f471841…} etc.) which are
+# stable across builds at the same Client.application Version. Recapture when
+# Rotman bumps the version (the FullName attribute inside ApplicationTrust XML
+# encodes Version=1.1.8.456).
+if [[ -f "$HERE/trust-grant.reg" ]]; then
+    echo "==> Importing ClickOnce trust grant"
+    "$WINE" regedit /S "$HERE/trust-grant.reg" 2>/dev/null || \
+        { echo "trust grant import failed"; exit 1; }
+    "$WINESERVER" -w   # flush registry to user.reg before snapshotting
+else
+    echo "    no trust-grant.reg found — first launch will hit the dfsvc trust prompt"
+fi
+
+# Strip any personal APIKey from user.config. ClickOnce caches a user.config
+# inside .../AppData/Local/Apps/2.0/Data/.../user.config that captures whatever
+# settings were persisted during build-time RIT runs. We DO want to keep the
+# server/port defaults (the launcher overrides them at runtime anyway), but
+# never want to ship a baked APIKey — it'd be the same value across every
+# student's install, and the live Rotman server expects per-trader keys.
+echo "==> Clearing personal APIKey from any baked user.config"
+while IFS= read -r -d '' f; do
+    # APIKey opens on one line and the <value>…</value> is on the next, so
+    # use sed's "n" command to step to the next line before substituting.
+    /usr/bin/sed -i '' -E \
+        '/<setting name="APIKey"/{n; s|<value>[^<]*</value>|<value />|;}' \
+        "$f"
+done < <(/usr/bin/find "$PREFIX/drive_c/users/crossover/AppData" -name user.config -print0 2>/dev/null)
+
 # ---------- 4. Assemble RIT.app ----------
 echo "==> Assembling $WRAPPER"
 rm -rf "$WRAPPER"
@@ -310,7 +350,16 @@ WINEBIN="$INNER/MacOS/wine64"
 if [ -x "$INNER/MacOS/wineserver" ]; then
     "$INNER/MacOS/wineserver" -k 2>/dev/null || true
 fi
-pkill -f "$APP_RES/wine/RITEngine.app/Contents/MacOS/wine64-preloader" 2>/dev/null || true
+# wine64-preloader's children rename argv[0] to the Win32 binary they exec
+# into ("services.exe", "svchost.exe", etc.), so `pkill -f wine64-preloader`
+# misses them and they orphan to launchd (ppid=1). lsof -t against the exec
+# binary on disk catches every process whose text segment maps that file,
+# regardless of argv[0] rewriting.
+WP="$INNER/MacOS/wine64-preloader"
+if [ -x "$WP" ]; then
+    REAP_PIDS=$(/usr/sbin/lsof -t -- "$WP" 2>/dev/null)
+    [ -n "$REAP_PIDS" ] && kill -9 $REAP_PIDS 2>/dev/null || true
+fi
 sleep 1
 
 if [ ! -d "$WINEPREFIX/dosdevices" ]; then
@@ -383,7 +432,18 @@ SERVER="${RIT_SERVER:-$DEFAULT_SERVER}"
 PORT="${RIT_PORT:-$DEFAULT_PORT}"
 URL="${DEPLOY_URL}?server=${SERVER}&port=${PORT}"
 
-exec "$WINEBIN" rundll32.exe dfshim.dll,ShOpenVerbApplication "$URL"
+# Offline fallback: dfshim's network activation can't reach the deployment URL
+# (school WiFi down, plane, etc.). dfshim refuses to launch when offline even
+# though Client.exe is cached locally. Fall back to plain `wine start
+# C:\Client.application` — server/port don't pre-fill but the form renders and
+# the app dismisses cleanly. RIT trading itself needs network, so this is only
+# useful for "let me look at my saved workspace" scenarios.
+if /usr/bin/curl -fsI --max-time 3 "$DEPLOY_URL" >/dev/null 2>&1; then
+    exec "$WINEBIN" rundll32.exe dfshim.dll,ShOpenVerbApplication "$URL"
+else
+    echo "==> $DEPLOY_URL unreachable — falling back to local activation (no pre-fill)" >&2
+    exec "$WINEBIN" start "C:\\Client.application"
+fi
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
 
