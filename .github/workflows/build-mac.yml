@@ -26,6 +26,12 @@ name: Build RIT.pkg (macOS)
   release:
     types: [created]
 
+# Issues: write — needed by "Open / update needs-mac-test issue" step.
+# Without it, github-script returns "Resource not accessible by integration".
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   build:
     name: Build RIT.app + RIT.dmg
