@@ -147,15 +147,28 @@ jobs:
               softwareupdate --install-rosetta --agree-to-license || true
           fi
 
-          echo "==> Installing pkg"
-          sudo installer -pkg "$PKG" -target / -verbose 2>&1 | tail -20
+          echo "==> Pre-install state"
+          ls -la /Applications/ 2>&1 | head -25
+          df -h / 2>&1 | head -3
+          echo "console user: $(stat -f%Su /dev/console) (id $(stat -f%u /dev/console))"
 
-          echo "==> Post-install inventory"
-          echo "/Applications/ entries:"
-          ls /Applications/ | head -20
+          echo "==> Inspecting the .pkg before install"
+          # Verify the pkg actually has RIT.app in its payload
+          pkgutil --payload-files "$PKG" 2>&1 | grep -i "RIT.app\|\.app$" | head -10 || true
           echo
-          echo "Search for RIT.app anywhere:"
-          sudo find / -maxdepth 5 -name "RIT.app" -type d 2>/dev/null | head -10
+
+          echo "==> Installing pkg (full verbose log)"
+          sudo installer -dumplog -verboseR -pkg "$PKG" -target / 2>&1
+
+          echo "==> /var/log/install.log (last 60 lines)"
+          sudo tail -60 /var/log/install.log 2>&1 || true
+
+          echo "==> Post-install state"
+          ls -la /Applications/ 2>&1 | head -25
+          df -h / 2>&1 | head -3
+          echo
+          echo "Search for RIT.app anywhere (sudo):"
+          sudo find / -maxdepth 6 -name "RIT.app" -type d 2>/dev/null | head -10
           echo
           echo "pkgutil receipt:"
           pkgutil --pkg-info com.rotman.rit 2>&1 || true
