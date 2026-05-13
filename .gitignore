@@ -1,0 +1,18 @@
+# Build outputs
+work/
+out/
+*.pkg
+*.dmg
+
+# Local test rig (developer-only; never shipped to students)
+overrides.conf
+*.creds
+*-test.sh
+test-*
+autotype
+rit-autotype
+*.local
+*.local.*
+
+# macOS junk
+.DS_Store
