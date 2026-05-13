@@ -1,4 +1,4 @@
-name: Build RIT.dmg (macOS)
+name: Build RIT.pkg (macOS)
 
 "on":
   workflow_dispatch:
@@ -6,8 +6,17 @@ name: Build RIT.dmg (macOS)
     paths:
       - "**.sh"
       - "**.yml"
+      - "wine-version.txt"
       - "http.sys"
       - "wine-host-matches-star-wildcard.patch"
+      - "RIT.iconset/**"
+  pull_request:
+    paths:
+      - "**.sh"
+      - "**.yml"
+      - "wine-version.txt"
+      - "http.sys"
+      - "RIT.iconset/**"
   release:
     types: [created]
 
@@ -29,7 +38,7 @@ jobs:
             .work/*.tar.xz
             .work/wine
             .work/prefix
-          key: build-${{ runner.os }}-gptk-${{ hashFiles('http.sys') }}
+          key: build-${{ runner.os }}-${{ hashFiles('wine-version.txt', 'http.sys') }}
 
       # -------- Codesigning prep (only if the secrets are set) --------
       # Required GitHub Secrets to enable Developer-ID signing + notarization:
@@ -109,6 +118,83 @@ jobs:
         run: |
           chmod +x ./build-rit-app.sh
           ./build-rit-app.sh
+
+      # -------- Smoke test: install + launch + API health --------
+      # Goal: prove the freshly-built pkg actually produces a working RIT install.
+      # Strategy: install the pkg, open RIT.app, wait for Client.exe's window to
+      # render (LaunchServices transitions it to Foreground around T+10s), then
+      # curl localhost:9999/v1/case and expect HTTP 401 — that response is what
+      # we get when:
+      #   - Wine launched ✅
+      #   - dfshim → dfsvc → Client.exe pipeline completed ✅
+      #   - Client.exe's HttpListener bound to :9999 ✅
+      #   - http.sys host_matches accepts the `*` wildcard URL (the bug we
+      #     patched for GPTK) ✅
+      # 401 specifically (vs 200) is correct here — we have no API key. A 200
+      # would actually be worse (it'd mean the API isn't requiring auth).
+      - name: Smoke test the .pkg
+        id: smoke
+        run: |
+          set -euo pipefail
+          PKG=out/RIT.pkg
+          test -f "$PKG" || { echo "::error::out/RIT.pkg missing"; exit 1; }
+
+          # GitHub runners pre-install Rosetta on Apple Silicon (since macos-15);
+          # double-check and install if not present, since the bundled wine is
+          # x86_64 and won't run without it on M-series.
+          if [ "$(uname -m)" = "arm64" ] && ! pgrep -q oahd 2>/dev/null; then
+              echo "Installing Rosetta 2..."
+              softwareupdate --install-rosetta --agree-to-license || true
+          fi
+
+          echo "==> Installing pkg"
+          sudo installer -pkg "$PKG" -target / -verbose 2>&1 | tail -20
+
+          test -d /Applications/RIT.app || { echo "::error::pkg installed but /Applications/RIT.app missing"; exit 1; }
+
+          echo "==> Launching RIT.app"
+          open /Applications/RIT.app
+
+          # Wait up to 60s for Client.exe to reach Foreground.
+          # The launcher's dfsvc-killer also triggers off this state, so its
+          # presence is the same readiness signal we use in the bash launcher.
+          echo "==> Waiting for Client.exe to reach Foreground (up to 60s)..."
+          for i in $(seq 1 60); do
+              CLIENT=$(pgrep -f 'Client\.exe' 2>/dev/null | head -1 || true)
+              if [ -n "$CLIENT" ] && lsappinfo info -app "$CLIENT" 2>/dev/null | grep -qF 'type="Foreground"'; then
+                  echo "::notice::Client.exe (PID $CLIENT) Foreground at T+${i}s"
+                  break
+              fi
+              sleep 1
+          done
+          if [ -z "${CLIENT:-}" ] || ! lsappinfo info -app "$CLIENT" 2>/dev/null | grep -qF 'type="Foreground"'; then
+              echo "::error::Client.exe did not reach Foreground within 60s"
+              echo "Process snapshot:"
+              ps -axo pid,command | grep -E 'wine|Client|dfsvc' | grep -v grep || true
+              exit 1
+          fi
+
+          echo "==> API health check (curl :9999/v1/case)"
+          # Give RIT a moment to bind its listener — Foreground may slightly
+          # precede the API socket being ready.
+          for i in $(seq 1 15); do
+              STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:9999/v1/case 2>/dev/null || echo "000")
+              echo "  attempt $i: HTTP $STATUS"
+              if [ "$STATUS" = "401" ] || [ "$STATUS" = "200" ]; then
+                  echo "::notice::API responded with HTTP $STATUS (listener is alive)"
+                  break
+              fi
+              sleep 2
+          done
+          if [ "$STATUS" != "401" ] && [ "$STATUS" != "200" ]; then
+              echo "::error::API health check failed — expected 401 (or 200), got HTTP $STATUS"
+              exit 1
+          fi
+
+          # Cleanup so artifact upload isn't racing wine processes
+          pkill -9 -f 'wine|Client\.exe|dfsvc' 2>/dev/null || true
+          sleep 2
+          echo "::notice::Smoke test PASSED"
 
       # -------- Always clean up the keychain --------
       - name: Remove ephemeral keychain

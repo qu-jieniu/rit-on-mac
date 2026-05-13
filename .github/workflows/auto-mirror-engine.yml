@@ -1,0 +1,169 @@
+name: Auto-mirror Wine engine (Gcenx GPTK)
+
+# Weekly check for a newer Game-Porting-Toolkit release at Gcenx/game-porting-toolkit.
+# When a new version appears, this workflow:
+#   1. Downloads the new .tar.xz
+#   2. Uploads it as an asset on a new "vendored-gptk-X.Y-Z" release on this repo
+#   3. Bumps wine-version.txt in a new branch
+#   4. Opens a PR
+# That PR triggers build-mac.yml (with smoke-test gating), so if the new engine
+# breaks RIT the PR stays red and is not merged.
+
+"on":
+  schedule:
+    # Sunday 06:00 UTC. Spreads load + lets the new version's nightly issues
+    # surface upstream before our PR opens.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-mirror:
+    name: Check Gcenx for new GPTK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect latest Gcenx GPTK release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Hit upstream — anonymous limits suffice for one call per week.
+          REL=$(curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/Gcenx/game-porting-toolkit/releases?per_page=5")
+
+          # Find the first release whose tag matches "Game-Porting-Toolkit-X.Y[-Z]"
+          # and that has a .tar.xz asset.
+          read -r UPSTREAM_TAG ASSET_URL ASSET_NAME <<<"$(echo "$REL" | python3 -c "
+          import json, sys
+          for r in json.load(sys.stdin):
+              tag = r.get('tag_name','')
+              if not tag.startswith('Game-Porting-Toolkit-'):
+                  continue
+              for a in r.get('assets', []):
+                  if a['name'].endswith('.tar.xz') and 'game-porting-toolkit' in a['name'].lower():
+                      print(tag, a['browser_download_url'], a['name'])
+                      sys.exit(0)
+          ")"
+
+          if [ -z "${UPSTREAM_TAG:-}" ]; then
+              echo "::warning::No GPTK release found on Gcenx — skipping"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+          fi
+
+          # Normalize: "Game-Porting-Toolkit-3.0-3" → "gptk-3.0-3"
+          UPSTREAM_VER="gptk-${UPSTREAM_TAG#Game-Porting-Toolkit-}"
+          CURRENT_VER="$(cat wine-version.txt 2>/dev/null | tr -d '[:space:]')"
+
+          echo "upstream=$UPSTREAM_VER (current=$CURRENT_VER)"
+          echo "upstream_tag=$UPSTREAM_TAG"      >> "$GITHUB_OUTPUT"
+          echo "upstream_ver=$UPSTREAM_VER"      >> "$GITHUB_OUTPUT"
+          echo "current_ver=$CURRENT_VER"        >> "$GITHUB_OUTPUT"
+          echo "asset_url=$ASSET_URL"            >> "$GITHUB_OUTPUT"
+          echo "asset_name=$ASSET_NAME"          >> "$GITHUB_OUTPUT"
+
+          if [ "$UPSTREAM_VER" = "$CURRENT_VER" ]; then
+              echo "::notice::Already on $CURRENT_VER — nothing to do"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "::notice::New version available: $UPSTREAM_VER (current: $CURRENT_VER)"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if our mirror release already exists
+        id: mirror_check
+        if: steps.latest.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="vendored-${{ steps.latest.outputs.upstream_ver }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "::notice::Mirror release $TAG already exists — skipping upload"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download + verify upstream tarball
+        if: steps.latest.outputs.skip == 'false' && steps.mirror_check.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          URL='${{ steps.latest.outputs.asset_url }}'
+          NAME='${{ steps.latest.outputs.asset_name }}'
+          echo "Downloading $NAME from $URL"
+          curl -fsSL --max-time 600 -o "/tmp/$NAME" "$URL"
+          ls -lh "/tmp/$NAME"
+          file "/tmp/$NAME"
+          # Sanity: should be an XZ archive
+          file "/tmp/$NAME" | grep -q "XZ compressed" || { echo "::error::Not a valid XZ tarball"; exit 1; }
+
+      - name: Create vendored release + upload asset
+        if: steps.latest.outputs.skip == 'false' && steps.mirror_check.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="vendored-${{ steps.latest.outputs.upstream_ver }}"
+          UPSTREAM='${{ steps.latest.outputs.upstream_tag }}'
+          NAME='${{ steps.latest.outputs.asset_name }}'
+
+          gh release create "$TAG" \
+              --title "Vendored: Apple Game Porting Toolkit ${{ steps.latest.outputs.upstream_ver }}" \
+              --notes "Auto-mirrored from [Gcenx/game-porting-toolkit @ $UPSTREAM](https://github.com/Gcenx/game-porting-toolkit/releases/tag/$UPSTREAM) by .github/workflows/auto-mirror-engine.yml.
+
+          Apple Game Porting Toolkit (Wine 7.7-based, arm64-native, with Apple's Rosetta-in-Process + D3D-to-Metal patches), distributed by [Gcenx](https://github.com/Gcenx). Unmodified upstream bytes.
+
+          **Do not edit this release manually** — it is managed by .github/workflows/auto-mirror-engine.yml." \
+              "/tmp/$NAME"
+
+      - name: Bump wine-version.txt + open PR
+        if: steps.latest.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          UPSTREAM_VER='${{ steps.latest.outputs.upstream_ver }}'
+          UPSTREAM_TAG='${{ steps.latest.outputs.upstream_tag }}'
+          CURRENT='${{ steps.latest.outputs.current_ver }}'
+          BRANCH="auto-mirror/$UPSTREAM_VER"
+
+          # If a PR for this version already exists, skip.
+          if gh pr list --state open --head "$BRANCH" --json number --jq 'length' | grep -q '^[1-9]'; then
+              echo "::notice::PR for $BRANCH already open — skipping"
+              exit 0
+          fi
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          echo "$UPSTREAM_VER" > wine-version.txt
+          git add wine-version.txt
+          git commit -m "Bump wine engine to $UPSTREAM_VER
+
+          Upstream: https://github.com/Gcenx/game-porting-toolkit/releases/tag/$UPSTREAM_TAG
+          Mirror:   https://github.com/${{ github.repository }}/releases/tag/vendored-$UPSTREAM_VER
+
+          Auto-opened by auto-mirror-engine.yml. Merge only after the build
+          workflow's smoke test passes — that verifies the new engine still
+          launches RIT and the local REST API responds."
+          git push -u origin "$BRANCH"
+
+          gh pr create \
+              --title "Bump wine engine $CURRENT → $UPSTREAM_VER" \
+              --body "Auto-opened by [\`auto-mirror-engine.yml\`](.github/workflows/auto-mirror-engine.yml).
+
+          - Upstream: [\`$UPSTREAM_TAG\`](https://github.com/Gcenx/game-porting-toolkit/releases/tag/$UPSTREAM_TAG)
+          - Mirror: [\`vendored-$UPSTREAM_VER\`](https://github.com/${{ github.repository }}/releases/tag/vendored-$UPSTREAM_VER)
+
+          ## Required before merge
+          The build workflow on this PR runs the **smoke test**: install pkg → launch RIT → wait for Client.exe Foreground → curl :9999/v1/case → expect HTTP 401. If any step fails, the PR stays red. Do not force-merge — a red smoke test means the new engine doesn't run RIT, and merging would ship a broken bundle to students."

@@ -50,26 +50,42 @@ fi
 mkdir -p "$OUT" "$WORK"
 
 # ---------- 1. Wine engine ----------
-# Default: Apple's Game Porting Toolkit. It's arm64-native, so no Rosetta is
-# needed (and Wine on Rosetta hits "unsupported privilege level: 0" errors
-# during heavy operations like winetricks dotnet48). Override WINE_URL to
-# pick a different engine (e.g., wine-staging for Intel-only builds).
+# The wine engine is Apple's Game Porting Toolkit (Wine 7.7-based, arm64-native,
+# bundled D3D-to-Metal + Rosetta-in-Process). Apple-Silicon-only — vanilla Wine
+# (e.g., Gcenx wine-staging) hits "rosetta error: unsupported privilege level: 0"
+# during heavy .NET 4.8 install operations on M-series Macs under Rosetta 2.
+#
+# We pin to a specific GPTK version (in wine-version.txt) and fetch from our
+# OWN release on rit-on-mac, NOT directly from upstream. Two reasons:
+#   1. Upstream-deletion resilience: if Gcenx removes the game-porting-toolkit
+#      repo (he has a history of deleting projects — Wineskin Winery, etc.),
+#      our builds keep working because we have our own copy.
+#   2. Reproducibility: pinned versions make `git checkout <sha>` + build
+#      produce identical artifacts months later.
+#
+# To update: bump wine-version.txt; the auto-mirror workflow on a weekly cron
+# detects new Gcenx releases and opens PRs that bump this file after smoke-
+# testing them in CI.
+#
+# Manual override (testing pre-release wines): set WINE_URL to a direct tarball
+# URL. Bypasses the version pin entirely.
+GPTK_VERSION="$(/bin/cat "$HERE/wine-version.txt" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
+[[ -n "$GPTK_VERSION" ]] || { echo "Missing or empty wine-version.txt"; exit 1; }
 if [[ -z "${WINE_URL:-}" ]]; then
-    echo "==> Locating latest Game Porting Toolkit release"
-    WINE_URL=$(curl -fsSL \
-        ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/Gcenx/game-porting-toolkit/releases?per_page=5" \
-      | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for rel in data:
-    for asset in rel.get('assets', []):
-        if asset['name'].endswith('.tar.xz') and 'game-porting-toolkit' in asset['name'].lower():
-            print(asset['browser_download_url']); sys.exit(0)
-")
-    [[ -n "$WINE_URL" ]] || { echo "Couldn't find a GPTK release"; exit 1; }
+    # Pinned version → our vendored release.
+    case "$GPTK_VERSION" in
+        gptk-*)
+            # e.g. gptk-3.0-3 → release tag vendored-gptk-3.0-3 with asset game-porting-toolkit-3.0-3.tar.xz
+            VER_NUM="${GPTK_VERSION#gptk-}"
+            WINE_URL="https://github.com/qu-jieniu/rit-on-mac/releases/download/vendored-${GPTK_VERSION}/game-porting-toolkit-${VER_NUM}.tar.xz"
+            ;;
+        *)
+            echo "Unsupported wine-version.txt value: '$GPTK_VERSION' (expected 'gptk-X.Y-Z')"
+            exit 1
+            ;;
+    esac
 fi
+echo "    engine version: $GPTK_VERSION"
 echo "    engine URL: $WINE_URL"
 
 ASSET="$(basename "$WINE_URL")"
