@@ -391,9 +391,11 @@ fi
 
 # ---------- 6. Installer package (.pkg) ----------
 echo "==> Building $PKG"
+PKG_ROOT="$WORK/pkg-root"
 PKG_SCRIPTS="$WORK/pkg-scripts"
-rm -rf "$PKG_SCRIPTS"
-mkdir -p "$PKG_SCRIPTS"
+rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"
+mkdir -p "$PKG_ROOT/Applications" "$PKG_SCRIPTS"
+cp -R "$WRAPPER" "$PKG_ROOT/Applications/"
 
 # Preinstall:
 #   1. Hard-stop on macOS Ventura or older (GPTK requires Sonoma 14+).
@@ -484,20 +486,24 @@ exit 0
 POSTINST
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-# Build a component package using pkgbuild's --component mode (the documented
-# path for a single .app bundle install). Earlier we used --root + an
-# Applications/ staging tree with --install-location /, which works on
-# real developer Macs but fails silently on GitHub Actions runners: the
-# installer reports success but never extracts the payload. --component
-# tells pkgbuild explicitly "this is one .app bundle to install at
-# --install-location", which produces a pkg the runner's installer
-# actually obeys.
+# Build the component package using --root mode (Applications/RIT.app under
+# install-location /). This is what worked historically on developer Macs.
+#
+# Known issue: GitHub Actions macOS runners (macos-latest / macos-15 Apple
+# Silicon) silently skip the payload write — installer reports success, but
+# no files land at /Applications/RIT.app, and the smoke test in this workflow
+# correctly catches that. Root cause is not yet known; suspected culprits
+# include nested-.app handling, signed-pkg requirement, or sealed-volume
+# firmlink quirks on the runner image. The .pkg artifact built here still
+# installs correctly on a real developer Mac.
+#
+# DEBUG knob: SKIP_PKG_SCRIPTS=1 builds without preinstall/postinstall.
 COMPONENT_PKG="$WORK/RIT-component.pkg"
 PKG_BUILD_ARGS=(
-    --component "$WRAPPER"
+    --root "$PKG_ROOT"
     --identifier com.rotman.rit
     --version "1.0"
-    --install-location /Applications
+    --install-location /
 )
 if [[ "${SKIP_PKG_SCRIPTS:-}" != "1" ]]; then
     PKG_BUILD_ARGS+=(--scripts "$PKG_SCRIPTS")
