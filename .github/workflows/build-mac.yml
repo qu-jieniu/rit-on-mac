@@ -120,15 +120,24 @@ jobs:
           ./build-rit-app.sh
 
       # -------- Smoke test: install + launch + API health --------
-      # Currently INFORMATIONAL on GitHub Actions runners (continue-on-error)
-      # because the runner's pkg installer silently skips the payload write
-      # for reasons we haven't yet root-caused (suspected: sealed-volume +
-      # unsigned pkg). The .pkg artifact built here still installs correctly
-      # on real developer Macs — manually verify on hardware until we figure
-      # out the runner-specific install issue.
+      # Goal: prove the pkg's payload extracts cleanly and the resulting
+      # bundle launches RIT + responds on the API.
+      #
+      # Why we install to ~/Applications and not /Applications:
+      #   macOS Sequoia/Tahoe (15+) silently rejects `sudo installer -target /`
+      #   writes to /Applications for UNSIGNED pkgs — installer reports
+      #   success but no files land. End users installing via Finder
+      #   double-click get a GUI auth prompt that uses a different code path
+      #   and works fine for unsigned pkgs, so production UX is unaffected.
+      #   CI just can't drive the GUI prompt. Installing to the user-writable
+      #   home target exercises the same payload extraction + bundle layout,
+      #   so we still catch real regressions.
+      #
+      # The 401 API response specifically (vs 200) is correct here — we have
+      # no API key. A 200 would actually be worse (it'd mean the API isn't
+      # requiring auth).
       - name: Smoke test the .pkg
         id: smoke
-        continue-on-error: true
         run: |
           set -euo pipefail
           PKG=out/RIT.pkg
@@ -142,52 +151,24 @@ jobs:
               softwareupdate --install-rosetta --agree-to-license || true
           fi
 
-          echo "==> Pre-install state"
-          ls -la /Applications/ 2>&1 | head -25
-          df -h / 2>&1 | head -3
-          echo "console user: $(stat -f%Su /dev/console) (id $(stat -f%u /dev/console))"
+          APP="$HOME/Applications/RIT.app"
+          rm -rf "$APP"
+          mkdir -p "$HOME/Applications"
 
-          echo "==> Inspecting the .pkg before install"
-          # Verify the pkg actually has RIT.app in its payload
-          pkgutil --payload-files "$PKG" 2>&1 | grep -i "RIT.app\|\.app$" | head -10 || true
-          echo
+          echo "==> Installing pkg to \$HOME/Applications"
+          installer -pkg "$PKG" -target CurrentUserHomeDirectory -verbose 2>&1 | tail -10
 
-          echo "==> Installing pkg (full verbose log)"
-          sudo installer -dumplog -verboseR -pkg "$PKG" -target / 2>&1
-
-          echo "==> /var/log/install.log (last 60 lines)"
-          sudo tail -60 /var/log/install.log 2>&1 || true
-
-          echo "==> preinstall.log"
-          sudo cat /tmp/rit-preinstall.log 2>&1 || true
-
-          echo "==> postinstall.log"
-          sudo cat /tmp/rit-postinstall.log 2>&1 || true
-
-          echo "==> Post-install state"
-          ls -la /Applications/ 2>&1 | head -25
-          df -h / 2>&1 | head -3
-          echo
-          echo "Search for RIT.app anywhere (sudo):"
-          sudo find / -maxdepth 6 -name "RIT.app" -type d 2>/dev/null | head -10
-          echo
-          echo "pkgutil receipt:"
-          pkgutil --pkg-info com.rotman.rit 2>&1 || true
-          echo
-          echo "pkgutil files (head):"
-          pkgutil --files com.rotman.rit 2>&1 | head -20
-
-          if [ ! -d /Applications/RIT.app ]; then
-              echo "::error::pkg installed but /Applications/RIT.app missing"
+          if [ ! -d "$APP" ]; then
+              echo "::error::pkg installed but $APP missing"
+              ls -la "$HOME/Applications/" | head -20
               exit 1
           fi
+          echo "::notice::Installed: $(du -sh "$APP" | cut -f1)"
 
           echo "==> Launching RIT.app"
-          open /Applications/RIT.app
+          open "$APP"
 
           # Wait up to 60s for Client.exe to reach Foreground.
-          # The launcher's dfsvc-killer also triggers off this state, so its
-          # presence is the same readiness signal we use in the bash launcher.
           echo "==> Waiting for Client.exe to reach Foreground (up to 60s)..."
           for i in $(seq 1 60); do
               CLIENT=$(pgrep -f 'Client\.exe' 2>/dev/null | head -1 || true)
@@ -205,8 +186,6 @@ jobs:
           fi
 
           echo "==> API health check (curl :9999/v1/case)"
-          # Give RIT a moment to bind its listener — Foreground may slightly
-          # precede the API socket being ready.
           for i in $(seq 1 15); do
               STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:9999/v1/case 2>/dev/null || echo "000")
               echo "  attempt $i: HTTP $STATUS"
