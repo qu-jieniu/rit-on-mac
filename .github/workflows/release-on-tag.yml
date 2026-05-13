@@ -1,0 +1,106 @@
+name: Release on Tag
+
+# Triggered when you push a `v*` tag (e.g. `git tag v123 && git push --tags`)
+# after manually testing a build on your Mac. Rebuilds .pkg from the tagged
+# commit and attaches it to a GitHub Release.
+#
+# The intentional gate here is human: build-mac.yml uploads an artifact + opens
+# a "needs-mac-test" issue on every push to main. Only after install + smoke
+# test on real hardware do you push the tag, and ONLY then does this workflow
+# produce a public release artifact.
+
+"on":
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build + sign + notarize + attach .pkg to release
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install winetricks
+        run: brew install winetricks
+
+      - name: Cache wine engine + prefix
+        uses: actions/cache@v4
+        with:
+          path: |
+            .work/*.tar.xz
+            .work/wine
+            .work/prefix
+          key: build-${{ runner.os }}-${{ hashFiles('wine-version.txt', 'http.sys') }}
+
+      # ---------- Codesigning prep (same flow as build-mac.yml) ----------
+      - name: Detect signing config
+        id: signing
+        env:
+          HAS_CODESIGN: ${{ secrets.CODESIGN_P12_BASE64 != '' }}
+          HAS_NOTARY:   ${{ secrets.NOTARY_APPLE_ID    != '' }}
+        run: |
+          echo "codesign=$HAS_CODESIGN" >> "$GITHUB_OUTPUT"
+          echo "notarize=$HAS_NOTARY"   >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        if: steps.signing.outputs.codesign == 'true'
+        env:
+          P12_BASE64:   ${{ secrets.CODESIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/rit-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain  -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          P12_PATH="$RUNNER_TEMP/devid.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$P12_PATH"
+          security import "$P12_PATH" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$P12_PATH"
+          security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          OTHER=$(security list-keychains -d user | tr -d '"' | xargs)
+          security list-keychains -d user -s "$KEYCHAIN" $OTHER
+
+      - name: Store notarytool credentials
+        if: steps.signing.outputs.notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          TEAM_ID:  ${{ secrets.NOTARY_TEAM_ID }}
+          PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "rit-notary" \
+              --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$PASSWORD"
+
+      # ---------- Build ----------
+      - name: Build the .pkg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          INSTALLER_IDENTITY: ${{ secrets.INSTALLER_IDENTITY }}
+          NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
+        run: |
+          chmod +x ./build-rit-app.sh
+          ./build-rit-app.sh
+
+      # ---------- Publish ----------
+      - name: Rename .pkg with version
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          mv out/RIT.pkg "out/RIT-${VER}.pkg"
+
+      - name: Create release and attach .pkg
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/RIT-*.pkg
+          generate_release_notes: true
+          draft: false
+          fail_on_unmatched_files: true
