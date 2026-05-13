@@ -124,14 +124,23 @@ echo "    wine: $WINE"
 
 # ---------- 2. Wine prefix ----------
 PREFIX="$WORK/prefix"
+
+# WINEPREFIX must be exported for ALL subsequent wine/wineserver invocations in
+# this script — including the trust-grant import in step 3.5 below. Earlier
+# versions exported it only inside the "fresh prefix" branch, so cached-prefix
+# CI runs silently invoked wine against ~/.wine (the default) and the trust-
+# grant import wrote to the wrong registry. Verified failure: PR #3 build
+# 25820726369 shipped a .pkg with 0 trust entries in user.reg despite
+# "==> Importing ClickOnce trust grant" appearing in the CI log.
+export WINEPREFIX="$PREFIX"
+export WINEARCH=win64
+export WINEDEBUG=-all
+
 if [[ -f "$PREFIX/.dotnet48-installed" ]]; then
     echo "==> Reusing existing prefix at $PREFIX"
 else
     echo "==> Building fresh prefix at $PREFIX (this includes .NET 4.8 — ~10 min)"
     rm -rf "$PREFIX"
-    export WINEPREFIX="$PREFIX"
-    export WINEARCH=win64
-    export WINEDEBUG=-all
 
     "$WINE" wineboot --init
     "$WINESERVER" -w
@@ -220,9 +229,19 @@ md5_src=$( md5 -q "$HERE/http.sys")
 # encodes Version=1.1.8.456).
 if [[ -f "$HERE/trust-grant.reg" ]]; then
     echo "==> Importing ClickOnce trust grant"
-    "$WINE" regedit /S "$HERE/trust-grant.reg" 2>/dev/null || \
+    "$WINE" regedit /S "$HERE/trust-grant.reg" || \
         { echo "trust grant import failed"; exit 1; }
     "$WINESERVER" -w   # flush registry to user.reg before snapshotting
+    # Verify the import actually took. user.reg should now contain both
+    # ClickOnce trust values. Earlier silent-failure mode: WINEPREFIX wasn't
+    # exported on cached-prefix runs, so regedit targeted ~/.wine and the
+    # build-prefix user.reg stayed empty.
+    TRUST_COUNT=$(grep -c "IsFullTrust\|ApplicationTrust" "$PREFIX/user.reg" 2>/dev/null || echo 0)
+    if [[ "$TRUST_COUNT" -lt 2 ]]; then
+        echo "::error::Trust grant import didn't land — user.reg has $TRUST_COUNT trust entries (expected 2). Aborting so we don't ship a broken bundle."
+        exit 1
+    fi
+    echo "    trust grant verified: $TRUST_COUNT entries in user.reg"
 else
     echo "    no trust-grant.reg found — first launch will hit the dfsvc trust prompt"
 fi
