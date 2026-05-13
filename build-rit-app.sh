@@ -123,16 +123,37 @@ WINESERVER="$WINE_DIR/bin/wineserver"
 echo "    wine: $WINE"
 
 # ---------- 2. Wine prefix ----------
-PREFIX="$WORK/prefix"
+# The prefix is built into $WORK/prefix on disk but wine ALWAYS sees it via a
+# stable canonical symlink at /Users/Shared/rit-prefix-anchor. This eliminates
+# the path-encoding bug the "Discover" commit (42a2b8a) identified: wine
+# bakes the build-time WINEPREFIX path into several places (registry,
+# wineboot state, NGen images), and a fresh install at a different path makes
+# wine fire wineboot --init which deadlocks dfsvc's splash. By using the same
+# absolute symlink path at build AND install time, wine never sees a path
+# mismatch.
+#
+# /Users/Shared is mode 1777 by default on every macOS install — any user can
+# create/replace the symlink, persistent across reboots, no admin required.
+# Single-user-per-Mac assumption: each launch replaces the symlink to point
+# at the launching user's RIT.app prefix. Multi-user on the same Mac would
+# need a UID-suffixed canonical path; not in scope for this build.
+PREFIX_REAL="$WORK/prefix"
+PREFIX_ANCHOR="/Users/Shared/rit-prefix-anchor"
+PREFIX="$PREFIX_ANCHOR"
 
-# WINEPREFIX must be exported for ALL subsequent wine/wineserver invocations in
-# this script — including the trust-grant import in step 3.5 below. Earlier
-# versions exported it only inside the "fresh prefix" branch, so cached-prefix
+mkdir -p "$(/usr/bin/dirname "$PREFIX_ANCHOR")"
+# rm + ln rather than ln -sfn, since some macOS versions of ln treat -n
+# inconsistently when the target is a directory.
+/bin/rm -f "$PREFIX_ANCHOR"
+/bin/ln -s "$PREFIX_REAL" "$PREFIX_ANCHOR"
+mkdir -p "$PREFIX_REAL"  # in case it doesn't exist yet (fresh CI)
+
+# WINEPREFIX must be exported for ALL subsequent wine/wineserver invocations
+# in this script — including the trust-grant import in step 3.5. Earlier
+# versions only exported it inside the "fresh prefix" branch, so cached-prefix
 # CI runs silently invoked wine against ~/.wine (the default) and the trust-
-# grant import wrote to the wrong registry. Verified failure: PR #3 build
-# 25820726369 shipped a .pkg with 0 trust entries in user.reg despite
-# "==> Importing ClickOnce trust grant" appearing in the CI log.
-export WINEPREFIX="$PREFIX"
+# grant import wrote to the wrong registry.
+export WINEPREFIX="$PREFIX_ANCHOR"   # the canonical path wine will remember
 export WINEARCH=win64
 export WINEDEBUG=-all
 
@@ -290,7 +311,10 @@ cp -R "$WINE_DIR/lib"   "$INNER_APP/Contents/lib"
 cp -R "$WINE_DIR/share" "$INNER_APP/Contents/share"
 [[ -d "$WINE_DIR/include" ]] && cp -R "$WINE_DIR/include" "$INNER_APP/Contents/include"
 
-cp -R "$PREFIX" "$WRAPPER/Contents/Resources/prefix"
+# $PREFIX is a symlink to $PREFIX_REAL. cp -R on macOS copies the symlink
+# itself, not the contents — bundle would ship a dangling symlink. Use
+# $PREFIX_REAL directly so we get the actual directory tree.
+cp -R "$PREFIX_REAL" "$WRAPPER/Contents/Resources/prefix"
 
 # Strip the dosdevices links — wine recreates them on first run, and they
 # may otherwise point at the builder's home directory.
@@ -376,13 +400,31 @@ cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_RES="$HERE/../Resources"
 INNER="$APP_RES/wine/RITEngine.app/Contents"
-export WINEPREFIX="$APP_RES/prefix"
+WINEBIN="$INNER/MacOS/wine64"
+[ -x "$WINEBIN" ] || WINEBIN="$INNER/MacOS/wine"
+
+# Canonical prefix symlink — see build-rit-app.sh step 2 for full rationale.
+# Short version: wine encodes the build-time WINEPREFIX in several places
+# inside the prefix. On a fresh install at a different path, that mismatch
+# fires wineboot --init which deadlocks dfsvc's splash. We sidestep the
+# whole class of bugs by giving wine the SAME absolute path at build and
+# every launch via this canonical symlink.
+#
+# /Users/Shared is world-writable (mode 1777) by default on macOS, so any
+# user can create this symlink without sudo. Single-user-per-machine; if
+# user A and user B both install RIT, whoever launches last "wins" the
+# symlink. Acceptable for student deployments.
+PREFIX_ANCHOR="/Users/Shared/rit-prefix-anchor"
+PREFIX_REAL="$APP_RES/prefix"
+mkdir -p "$(dirname "$PREFIX_ANCHOR")"
+/bin/rm -f "$PREFIX_ANCHOR"
+/bin/ln -s "$PREFIX_REAL" "$PREFIX_ANCHOR"
+
+export WINEPREFIX="$PREFIX_ANCHOR"
 export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
 export PATH="$INNER/MacOS:$PATH"
 export DYLD_FALLBACK_LIBRARY_PATH="$INNER/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-WINEBIN="$INNER/MacOS/wine64"
-[ -x "$WINEBIN" ] || WINEBIN="$INNER/MacOS/wine"
 
 # Reap stragglers from the previous session: macOS Cmd-Q kills Client.exe
 # but wineserver and the wine system daemons (services, svchost, etc.)
