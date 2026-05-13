@@ -6,6 +6,8 @@ name: Build RIT.pkg (macOS)
     paths:
       - "**.sh"
       - "**.yml"
+      - "**.reg"
+      - "scripts/**"
       - "wine-version.txt"
       - "http.sys"
       - "wine-host-matches-star-wildcard.patch"
@@ -14,6 +16,8 @@ name: Build RIT.pkg (macOS)
     paths:
       - "**.sh"
       - "**.yml"
+      - "**.reg"
+      - "scripts/**"
       - "wine-version.txt"
       - "http.sys"
       - "RIT.iconset/**"
