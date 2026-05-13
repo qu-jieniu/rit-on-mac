@@ -115,7 +115,6 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
           INSTALLER_IDENTITY: ${{ secrets.INSTALLER_IDENTITY }}
           NOTARY_PROFILE: ${{ steps.signing.outputs.notarize == 'true' && 'rit-notary' || '' }}
-          SKIP_PKG_SCRIPTS: "1"  # DEBUG: isolate whether scripts break the install
         run: |
           chmod +x ./build-rit-app.sh
           ./build-rit-app.sh

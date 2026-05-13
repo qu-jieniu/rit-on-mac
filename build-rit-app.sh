@@ -195,7 +195,13 @@ mkdir -p "$WRAPPER/Contents/MacOS" "$WRAPPER/Contents/Resources"
 # RIT icon. LSUIElement keeps non-window wine processes (services,
 # explorer, etc.) off the Dock; wine's cocoa driver upgrades only the
 # processes that actually open a window via setActivationPolicy:Regular.
-INNER_APP="$WRAPPER/Contents/Resources/wine/RIT.app"
+# Inner-app name MUST differ from the outer "RIT.app" — when both share the
+# same name macOS pkg installer's nested-bundle handling fails silently (the
+# pkg "installs successfully" but no files land at /Applications/RIT.app).
+# Using a distinct name (RITEngine.app) avoids the collision while still
+# letting wine child processes inherit RIT branding via this inner bundle's
+# Info.plist (CFBundleName=RIT, CFBundleIconFile=RIT, LSUIElement=true).
+INNER_APP="$WRAPPER/Contents/Resources/wine/RITEngine.app"
 mkdir -p "$INNER_APP/Contents/Resources"
 cp -R "$WINE_DIR/bin"   "$INNER_APP/Contents/MacOS"
 cp -R "$WINE_DIR/lib"   "$INNER_APP/Contents/lib"
@@ -287,7 +293,7 @@ cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
 #!/bin/bash
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_RES="$HERE/../Resources"
-INNER="$APP_RES/wine/RIT.app/Contents"
+INNER="$APP_RES/wine/RITEngine.app/Contents"
 export WINEPREFIX="$APP_RES/prefix"
 export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
@@ -304,7 +310,7 @@ WINEBIN="$INNER/MacOS/wine64"
 if [ -x "$INNER/MacOS/wineserver" ]; then
     "$INNER/MacOS/wineserver" -k 2>/dev/null || true
 fi
-pkill -f "$APP_RES/wine/RIT.app/Contents/MacOS/wine64-preloader" 2>/dev/null || true
+pkill -f "$APP_RES/wine/RITEngine.app/Contents/MacOS/wine64-preloader" 2>/dev/null || true
 sleep 1
 
 if [ ! -d "$WINEPREFIX/dosdevices" ]; then
