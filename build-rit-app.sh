@@ -319,6 +319,24 @@ if [ ! -d "$WINEPREFIX/dosdevices" ]; then
     ln -sfn '/'          "$WINEPREFIX/dosdevices/z:"
 fi
 
+# Stop wine from triggering wineboot --init on first launch.
+#
+# Wine checks: if mtime(engine/share/wine/wine.inf) > content(prefix/.update-timestamp),
+# wine spawns wineboot --init to "update" the prefix to match the current engine.
+#
+# After our pkg install, wine.inf has fresh install-time mtime but the prefix's
+# .update-timestamp still contains the BUILD-time value, so wine sees a stale
+# prefix and runs wineboot. wineboot then hangs for 5+ minutes (independent
+# bug we don't need to fix — we just don't want to trigger it). The prefix
+# is already fully .NET-4.8-initialized at build time, so wineboot has no
+# real work to do.
+#
+# Bump .update-timestamp to current wine.inf mtime so wine sees a fresh prefix.
+WINE_INF="$INNER/share/wine/wine.inf"
+if [ -r "$WINE_INF" ] && [ -f "$WINEPREFIX/.update-timestamp" ]; then
+    /usr/bin/stat -f%m "$WINE_INF" > "$WINEPREFIX/.update-timestamp" 2>/dev/null || true
+fi
+
 # Single-Dock-icon: dfsvc.exe (the .NET ClickOnce service) gets a Dock
 # entry alongside Client.exe during launch. dfsvc is only needed during
 # ClickOnce activation; once Client.exe's window is up, dfsvc is dormant
