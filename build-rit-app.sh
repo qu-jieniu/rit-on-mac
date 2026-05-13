@@ -482,14 +482,16 @@ POSTINST
 chmod +x "$PKG_SCRIPTS/postinstall"
 
 # Build a component package (no choices, just install RIT.app).
+# DEBUG: SKIP_PKG_SCRIPTS=1 builds the pkg without preinstall/postinstall to
+# isolate whether scripts are interfering with payload extraction on CI runners.
 COMPONENT_PKG="$WORK/RIT-component.pkg"
-pkgbuild \
-    --root "$PKG_ROOT" \
-    --identifier com.rotman.rit \
-    --version "1.0" \
-    --install-location / \
-    --scripts "$PKG_SCRIPTS" \
-    "$COMPONENT_PKG"
+PKG_BUILD_ARGS=(--root "$PKG_ROOT" --identifier com.rotman.rit --version "1.0" --install-location /)
+if [[ "${SKIP_PKG_SCRIPTS:-}" != "1" ]]; then
+    PKG_BUILD_ARGS+=(--scripts "$PKG_SCRIPTS")
+else
+    echo "    SKIP_PKG_SCRIPTS=1 — building without pre/postinstall scripts"
+fi
+pkgbuild "${PKG_BUILD_ARGS[@]}" "$COMPONENT_PKG"
 
 # Wrap into a product/distribution archive so we can attach the welcome /
 # license screens later if desired.
