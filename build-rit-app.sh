@@ -223,6 +223,18 @@ rm -rf "$INNER_APP/Contents/share/man" \
        "$INNER_APP/Contents/share/info" \
        "$INNER_APP/Contents/share/doc" 2>/dev/null || true
 
+# .NET 4.8 self-extraction cache. ~235 MB of installer payload that the .NET
+# runtime never touches after install completes. Major saving + the ~700
+# files it removes meaningfully shorten the installer's "Registering updated
+# components" phase (macOS validates every file's signature).
+rm -rf "$WRAPPER_PFX/drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/SetupCache" \
+       "$WRAPPER_PFX/drive_c/windows/Microsoft.NET/Framework/v4.0.30319/SetupCache" 2>/dev/null || true
+
+# GPTK ships GStreamer + D3DMetal to cover games. RIT is a WinForms trading
+# app — no audio/video and no DirectX. Drop both.
+rm -rf "$INNER_LIB/GStreamer.framework" \
+       "$INNER_LIB/external" 2>/dev/null || true
+
 echo "    bundle size after slim: $(du -sh "$WRAPPER" | cut -f1)"
 
 # Inner .app's Info.plist + icon — what macOS reads to label every wine
