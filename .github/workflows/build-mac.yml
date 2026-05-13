@@ -168,18 +168,27 @@ jobs:
           echo "==> Launching RIT.app"
           open "$APP"
 
-          # Wait up to 60s for Client.exe to reach Foreground.
-          echo "==> Waiting for Client.exe to reach Foreground (up to 60s)..."
-          for i in $(seq 1 60); do
+          # Wait up to 180s for Client.exe to reach Foreground. First-launch
+          # wineboot --init runs against the freshly-installed prefix path
+          # (the prefix was BUILT with a different WINEPREFIX, so wine sees
+          # the new path as "fresh" and reinitializes) which adds ~30-60s
+          # before ClickOnce/Client.exe even starts.
+          echo "==> Waiting for Client.exe to reach Foreground (up to 180s)..."
+          for i in $(seq 1 180); do
               CLIENT=$(pgrep -f 'Client\.exe' 2>/dev/null | head -1 || true)
               if [ -n "$CLIENT" ] && lsappinfo info -app "$CLIENT" 2>/dev/null | grep -qF 'type="Foreground"'; then
                   echo "::notice::Client.exe (PID $CLIENT) Foreground at T+${i}s"
                   break
               fi
+              # Periodic progress every 30s so the log isn't completely silent
+              if [ $((i % 30)) = 0 ]; then
+                  echo "  T+${i}s waiting; current wine procs:"
+                  ps -axo pid,command | grep -E 'wine|Client|dfsvc' | grep -v grep | head -5 || true
+              fi
               sleep 1
           done
           if [ -z "${CLIENT:-}" ] || ! lsappinfo info -app "$CLIENT" 2>/dev/null | grep -qF 'type="Foreground"'; then
-              echo "::error::Client.exe did not reach Foreground within 60s"
+              echo "::error::Client.exe did not reach Foreground within 180s"
               echo "Process snapshot:"
               ps -axo pid,command | grep -E 'wine|Client|dfsvc' | grep -v grep || true
               exit 1
