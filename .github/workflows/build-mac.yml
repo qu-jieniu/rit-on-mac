@@ -150,7 +150,23 @@ jobs:
           echo "==> Installing pkg"
           sudo installer -pkg "$PKG" -target / -verbose 2>&1 | tail -20
 
-          test -d /Applications/RIT.app || { echo "::error::pkg installed but /Applications/RIT.app missing"; exit 1; }
+          echo "==> Post-install inventory"
+          echo "/Applications/ entries:"
+          ls /Applications/ | head -20
+          echo
+          echo "Search for RIT.app anywhere:"
+          sudo find / -maxdepth 5 -name "RIT.app" -type d 2>/dev/null | head -10
+          echo
+          echo "pkgutil receipt:"
+          pkgutil --pkg-info com.rotman.rit 2>&1 || true
+          echo
+          echo "pkgutil files (head):"
+          pkgutil --files com.rotman.rit 2>&1 | head -20
+
+          if [ ! -d /Applications/RIT.app ]; then
+              echo "::error::pkg installed but /Applications/RIT.app missing"
+              exit 1
+          fi
 
           echo "==> Launching RIT.app"
           open /Applications/RIT.app
@@ -203,7 +219,10 @@ jobs:
           security delete-keychain "${{ steps.import_cert.outputs.keychain }}" || true
 
       # -------- Publish --------
+      # if: always() keeps the artifact even when the smoke test fails,
+      # so we can grab the .pkg and inspect/iterate locally.
       - name: Upload artifact
+        if: always() && hashFiles('out/RIT.pkg') != ''
         uses: actions/upload-artifact@v4
         with:
           name: RIT-${{ github.sha }}
