@@ -384,13 +384,10 @@ if [[ "${SKIP_CODESIGN:-}" != "1" ]]; then
 fi
 
 # ---------- 6. Installer package (.pkg) ----------
-# Staging: an installer expects a tree mirroring the destination layout.
 echo "==> Building $PKG"
-PKG_ROOT="$WORK/pkg-root"
 PKG_SCRIPTS="$WORK/pkg-scripts"
-rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"
-mkdir -p "$PKG_ROOT/Applications" "$PKG_SCRIPTS"
-cp -R "$WRAPPER" "$PKG_ROOT/Applications/"
+rm -rf "$PKG_SCRIPTS"
+mkdir -p "$PKG_SCRIPTS"
 
 # Preinstall:
 #   1. Hard-stop on macOS Ventura or older (GPTK requires Sonoma 14+).
@@ -481,11 +478,21 @@ exit 0
 POSTINST
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-# Build a component package (no choices, just install RIT.app).
-# DEBUG: SKIP_PKG_SCRIPTS=1 builds the pkg without preinstall/postinstall to
-# isolate whether scripts are interfering with payload extraction on CI runners.
+# Build a component package using pkgbuild's --component mode (the documented
+# path for a single .app bundle install). Earlier we used --root + an
+# Applications/ staging tree with --install-location /, which works on
+# real developer Macs but fails silently on GitHub Actions runners: the
+# installer reports success but never extracts the payload. --component
+# tells pkgbuild explicitly "this is one .app bundle to install at
+# --install-location", which produces a pkg the runner's installer
+# actually obeys.
 COMPONENT_PKG="$WORK/RIT-component.pkg"
-PKG_BUILD_ARGS=(--root "$PKG_ROOT" --identifier com.rotman.rit --version "1.0" --install-location /)
+PKG_BUILD_ARGS=(
+    --component "$WRAPPER"
+    --identifier com.rotman.rit
+    --version "1.0"
+    --install-location /Applications
+)
 if [[ "${SKIP_PKG_SCRIPTS:-}" != "1" ]]; then
     PKG_BUILD_ARGS+=(--scripts "$PKG_SCRIPTS")
 else
