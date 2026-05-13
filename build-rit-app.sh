@@ -363,9 +363,36 @@ fi
     done
 ) &
 
-exec "$WINEBIN" start "C:\\Client.application"
+# Default deployment URL + server/port. The launcher activates RIT via
+# dfshim.dll's ShOpenVerbApplication (the ClickOnce activator), passing
+# the server/port through the activation URL's query string. RIT's login
+# form reads these (decompiled Client.exe: ActivationUri.Query →
+# Settings.Default.ServerAddress + LoginPort.Value) and pre-fills the
+# fields, so students don't have to type the school's server hostname.
+#
+# Three override layers, low-to-high precedence:
+#   1. Build-time defaults baked below by build-rit-app.sh (substituted
+#      via sed after writing this file — see the BUILD_DEFAULT_* knobs).
+#   2. The bundled launcher reads these at every launch.
+#   3. Launch-time env vars (RIT_SERVER, RIT_PORT, RIT_DEPLOY_URL) override
+#      both. Useful for local testing against a different host.
+DEFAULT_SERVER="__BUILD_DEFAULT_SERVER__"
+DEFAULT_PORT="__BUILD_DEFAULT_PORT__"
+DEPLOY_URL="${RIT_DEPLOY_URL:-http://rit.306w.ca/client/Client.application}"
+SERVER="${RIT_SERVER:-$DEFAULT_SERVER}"
+PORT="${RIT_PORT:-$DEFAULT_PORT}"
+URL="${DEPLOY_URL}?server=${SERVER}&port=${PORT}"
+
+exec "$WINEBIN" rundll32.exe dfshim.dll,ShOpenVerbApplication "$URL"
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
+
+# Substitute build-time defaults into the launcher. Override at build time
+# with BUILD_RIT_SERVER=… BUILD_RIT_PORT=… ./build-rit-app.sh
+/usr/bin/sed -i '' \
+    -e "s|__BUILD_DEFAULT_SERVER__|${BUILD_RIT_SERVER:-flserver.rotman.utoronto.ca}|" \
+    -e "s|__BUILD_DEFAULT_PORT__|${BUILD_RIT_PORT:-10000}|" \
+    "$WRAPPER/Contents/MacOS/RIT"
 
 # Generate RIT.icns from the iconset (PNGs checked into the repo at
 # RIT.iconset/). iconutil is built into macOS.
