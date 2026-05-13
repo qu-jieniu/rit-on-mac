@@ -163,6 +163,12 @@ jobs:
           echo "==> /var/log/install.log (last 60 lines)"
           sudo tail -60 /var/log/install.log 2>&1 || true
 
+          echo "==> preinstall.log"
+          sudo cat /tmp/rit-preinstall.log 2>&1 || true
+
+          echo "==> postinstall.log"
+          sudo cat /tmp/rit-postinstall.log 2>&1 || true
+
           echo "==> Post-install state"
           ls -la /Applications/ 2>&1 | head -25
           df -h / 2>&1 | head -3

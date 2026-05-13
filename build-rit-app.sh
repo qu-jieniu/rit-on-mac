@@ -401,7 +401,14 @@ cp -R "$WRAPPER" "$PKG_ROOT/Applications/"
 #      registry, no API key from a previous version).
 cat > "$PKG_SCRIPTS/preinstall" <<'PREINST'
 #!/bin/bash
-set -e
+exec >/tmp/rit-preinstall.log 2>&1
+set -x
+
+echo "=== preinstall starting at $(date) ==="
+echo "argv: $0 $*"
+echo "Initial /Applications state:"
+ls -la /Applications/ | head -25
+echo
 
 # 1. macOS version gate.
 MAJOR=$(/usr/bin/sw_vers -productVersion | cut -d. -f1)
@@ -419,6 +426,10 @@ fi
 #    the same baked-in state, no leftover settings or ClickOnce cache.
 /bin/rm -rf /Applications/RIT.app
 
+echo
+echo "After rm /Applications state:"
+ls -la /Applications/ | head -25
+echo "=== preinstall done at $(date) ==="
 exit 0
 PREINST
 chmod +x "$PKG_SCRIPTS/preinstall"
@@ -429,6 +440,16 @@ chmod +x "$PKG_SCRIPTS/preinstall"
 # .pkg flow gives us for free.
 cat > "$PKG_SCRIPTS/postinstall" <<'POSTINST'
 #!/bin/bash
+exec >/tmp/rit-postinstall.log 2>&1
+set -x
+echo "=== postinstall starting at $(date) ==="
+echo "argv: $0 $*"
+echo "Initial /Applications state:"
+ls -la /Applications/ | head -25
+echo "RIT.app stat:"
+stat /Applications/RIT.app 2>&1 || echo "(RIT.app does not exist at postinstall start)"
+echo
+
 APP="/Applications/RIT.app"
 
 # 1. Strip quarantine recursively from every file in the bundle, including
@@ -451,6 +472,11 @@ fi
 if [ "$(/usr/bin/uname -m)" = "arm64" ] && ! /usr/bin/pgrep -q oahd 2>/dev/null; then
     /usr/sbin/softwareupdate --install-rosetta --agree-to-license || true
 fi
+
+echo
+echo "Final /Applications state:"
+ls -la /Applications/ | head -25
+echo "=== postinstall done at $(date) ==="
 exit 0
 POSTINST
 chmod +x "$PKG_SCRIPTS/postinstall"
