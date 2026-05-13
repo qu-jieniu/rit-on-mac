@@ -1,0 +1,111 @@
+name: Auto-mirror RIT Client.application
+
+# Weekly check for a newer Client.application at rit.306w.ca. When the
+# Version attribute in the manifest changes, this workflow:
+#   1. Updates client-application-version.txt to the new value
+#   2. Opens a PR
+# That PR triggers build-mac.yml (smoke-test gating), so if the new version
+# breaks RIT under Wine the PR stays red and we don't merge.
+#
+# We do NOT vendor the .application file itself — Rotman's signature on the
+# manifest is what dfshim validates at runtime. Storing our own copy would
+# be tamper-bait. The bundle just downloads from rit.306w.ca at build time;
+# this workflow tracks the version we know works.
+
+"on":
+  schedule:
+    # Sunday 07:00 UTC. Same cadence as auto-mirror-engine, offset by 1h to
+    # avoid both running simultaneously.
+    - cron: '0 7 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-mirror:
+    name: Check rit.306w.ca for newer Client.application
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect upstream Version
+        id: detect
+        run: |
+          set -euo pipefail
+          curl -fsSL http://rit.306w.ca/client/Client.application \
+               -o /tmp/upstream.application
+          NEW_VER=$(python3 - /tmp/upstream.application <<'PYEOF'
+          import re, sys
+          with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+              t = f.read()
+          m = re.search(r'name="Client\.application"[^>]*version="([0-9.]+)"', t) \
+              or re.search(r'version="([0-9.]+)"[^>]*name="Client\.application"', t)
+          print(m.group(1) if m else "unknown")
+          PYEOF
+          )
+          CUR_VER=$(cat client-application-version.txt 2>/dev/null | tr -d '[:space:]' || echo "")
+          echo "upstream=$NEW_VER pinned=$CUR_VER"
+          echo "new=$NEW_VER" >> "$GITHUB_OUTPUT"
+          echo "cur=$CUR_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no change or detection failed
+        id: gate
+        run: |
+          if [ "${{ steps.detect.outputs.new }}" = "unknown" ]; then
+              echo "::warning::Could not parse Version from upstream manifest"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.detect.outputs.new }}" = "${{ steps.detect.outputs.cur }}" ]; then
+              echo "::notice::Pinned version ${{ steps.detect.outputs.cur }} matches upstream — nothing to do"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "::notice::Version drift detected: ${{ steps.detect.outputs.cur }} → ${{ steps.detect.outputs.new }}"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open PR to bump version
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.detect.outputs.new }}"
+          CUR="${{ steps.detect.outputs.cur }}"
+          BRANCH="auto/clientapp-${NEW}"
+
+          # Idempotent: if a PR for this exact version is already open, skip.
+          if gh pr list --state open --head "$BRANCH" --json number --jq '.[].number' | grep -q .; then
+              echo "::notice::PR for $BRANCH already open"
+              exit 0
+          fi
+
+          echo "$NEW" > client-application-version.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add client-application-version.txt
+          git commit -m "Auto-bump Client.application $CUR → $NEW"
+          git push -u origin "$BRANCH"
+
+          gh pr create --base main --head "$BRANCH" \
+              --title "Auto-bump Client.application $CUR → $NEW" \
+              --body "$(cat <<EOF
+          Detected a new Client.application from \`rit.306w.ca\`.
+
+          - Old pinned version: \`$CUR\`
+          - New upstream version: \`$NEW\`
+
+          ## Before merging
+
+          1. **Watch build-mac.yml run on this PR** — the smoke test gates the bump. If first-launch hangs (no Client.exe within 5 min) the bump is unsafe and trust-grant.reg likely needs recapturing.
+          2. **Trust grant version semantics:** our \`trust-grant.reg\` carries \`Persist="true"\`, which makes the per-deployment trust grant survive Rotman bumping the application version, provided they don't rotate their publisher cert. If smoke test passes, no recapture needed.
+          3. **If first launch hangs:** install the new .pkg manually, accept the trust prompt once, then \`scripts/extract_trust_grant.py ~/Applications/RIT.app/Contents/Resources/prefix/user.reg > trust-grant.reg\` and commit on this branch.
+
+          🤖 Opened by auto-mirror-clientapp.yml
+          EOF
+          )"

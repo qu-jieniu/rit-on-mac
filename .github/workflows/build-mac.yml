@@ -9,6 +9,7 @@ name: Build RIT.pkg (macOS)
       - "**.reg"
       - "scripts/**"
       - "wine-version.txt"
+      - "client-application-version.txt"
       - "http.sys"
       - "wine-host-matches-star-wildcard.patch"
       - "RIT.iconset/**"
@@ -19,6 +20,7 @@ name: Build RIT.pkg (macOS)
       - "**.reg"
       - "scripts/**"
       - "wine-version.txt"
+      - "client-application-version.txt"
       - "http.sys"
       - "RIT.iconset/**"
   release:
@@ -248,3 +250,85 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/RIT.pkg
+
+      # -------- Notify: prompt developer to test on real Mac --------
+      # CI's smoke test is informational only (wineboot deadlocks on the
+      # macos-latest sandbox). The real "did this build land cleanly" check
+      # happens on a developer Mac. Auto-create / update a tracking issue so
+      # each main-branch build is impossible to forget; the body has copy-
+      # pasteable install commands plus the tag-push command that triggers
+      # release-on-tag.yml to publish.
+      - name: Ensure needs-mac-test label exists
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('out/RIT.pkg') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'needs-mac-test',
+              });
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'needs-mac-test',
+                  color: 'fbca04',
+                  description: 'Awaiting real-Mac confirmation before release tag',
+                });
+              } else { throw e; }
+            }
+
+      - name: Open / update needs-mac-test issue
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('out/RIT.pkg') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runId = context.runId;
+            const runNumber = context.runNumber;
+            const sha = context.sha.slice(0, 7);
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+            const title = `Test build #${runNumber} (\`${sha}\`) on Mac`;
+            const body = [
+              `**Build #${runNumber}** on \`main\` (\`${sha}\`) — needs a real-Mac smoke test before release tag.`,
+              ``,
+              `[CI artifact / logs](${runUrl})`,
+              ``,
+              `**Install + test on your Mac:**`,
+              `\`\`\`sh`,
+              `mkdir -p ~/rit-test && cd ~/rit-test`,
+              `gh run download ${runId} -R ${owner}/${repo} -n RIT-${context.sha}`,
+              `installer -pkg RIT.pkg -target CurrentUserHomeDirectory`,
+              `open ~/Applications/RIT.app`,
+              `\`\`\``,
+              ``,
+              `**If RIT logs in cleanly and \`curl -H "X-API-Key: <KEY>" http://localhost:9999/v1/case\` returns 200 — tag for release:**`,
+              `\`\`\`sh`,
+              `git tag v${runNumber} && git push --tags`,
+              `\`\`\``,
+              ``,
+              `Pushing the tag triggers \`release-on-tag.yml\` which rebuilds, signs/notarizes, and publishes the .pkg as a GitHub Release.`,
+              ``,
+              `Close this issue once the tag has been pushed.`,
+            ].join('\n');
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'needs-mac-test',
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.update({
+                owner, repo,
+                issue_number: existing[0].number,
+                title, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo,
+                title, body,
+                labels: ['needs-mac-test'],
+              });
+            }

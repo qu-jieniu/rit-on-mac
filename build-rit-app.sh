@@ -161,6 +161,29 @@ if [[ ! -f "$CLIENT_APP" ]]; then
     curl -fsSL "$CLIENT_URL" -o "$CLIENT_APP"
 fi
 
+# Verify the downloaded manifest matches the pinned version. Drift is a
+# WARNING (not an error) — the auto-mirror-clientapp.yml workflow detects
+# it weekly and opens a PR. Manual builds during the gap between Rotman
+# publishing a new version and us merging the auto-bump keep working, just
+# with a CI annotation. ClickOnce's Persist="true" attribute on our trust
+# grant means version drift normally doesn't break first-launch trust.
+if [[ -f "$HERE/client-application-version.txt" ]]; then
+    PINNED_VER=$(/bin/cat "$HERE/client-application-version.txt" | /usr/bin/tr -d '[:space:]')
+    DETECTED_VER=$(/usr/bin/python3 - "$CLIENT_APP" <<'PYEOF'
+import re, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    t = f.read()
+m = re.search(r'name="Client\.application"[^>]*version="([0-9.]+)"', t) \
+    or re.search(r'version="([0-9.]+)"[^>]*name="Client\.application"', t)
+print(m.group(1) if m else "unknown")
+PYEOF
+)
+    echo "    Client.application: pinned=$PINNED_VER, downloaded=$DETECTED_VER"
+    if [[ "$DETECTED_VER" != "$PINNED_VER" ]]; then
+        echo "::warning::Client.application version drift — pinned ${PINNED_VER}, rit.306w.ca now serves ${DETECTED_VER}. auto-mirror-clientapp.yml should open a PR shortly. Recapture trust-grant.reg only if first-launch hangs on the new version (rare; ClickOnce trust persistence usually covers minor version bumps)."
+    fi
+fi
+
 echo "==> Installing patched http.sys"
 # Drop into the prefix...
 cp "$HERE/http.sys" "$PREFIX/drive_c/windows/system32/drivers/http.sys"
