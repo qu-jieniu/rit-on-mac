@@ -168,8 +168,25 @@ echo "==> Assembling $WRAPPER"
 rm -rf "$WRAPPER"
 mkdir -p "$WRAPPER/Contents/MacOS" "$WRAPPER/Contents/Resources"
 
-cp -R "$WINE_DIR"  "$WRAPPER/Contents/Resources/wine"
-cp -R "$PREFIX"    "$WRAPPER/Contents/Resources/prefix"
+# Inner-.app layout (RIT branding for wine processes):
+# All wine64-preloader children inherit their bundle identity from the
+# .app whose Contents/MacOS/ contains the running binary. Unbundled paths
+# (e.g., Contents/Resources/wine/bin/wine64-preloader) make macOS label
+# every wine process "wine64-preloader" in the Dock. By nesting wine
+# inside Contents/Resources/wine/RIT.app/Contents/{MacOS,lib,share}, every
+# child process picks up the inner Info.plist (CFBundleName=RIT,
+# CFBundleIconFile=RIT, LSUIElement=true) and shows as "RIT" with the
+# RIT icon. LSUIElement keeps non-window wine processes (services,
+# explorer, etc.) off the Dock; wine's cocoa driver upgrades only the
+# processes that actually open a window via setActivationPolicy:Regular.
+INNER_APP="$WRAPPER/Contents/Resources/wine/RIT.app"
+mkdir -p "$INNER_APP/Contents/Resources"
+cp -R "$WINE_DIR/bin"   "$INNER_APP/Contents/MacOS"
+cp -R "$WINE_DIR/lib"   "$INNER_APP/Contents/lib"
+cp -R "$WINE_DIR/share" "$INNER_APP/Contents/share"
+[[ -d "$WINE_DIR/include" ]] && cp -R "$WINE_DIR/include" "$INNER_APP/Contents/include"
+
+cp -R "$PREFIX" "$WRAPPER/Contents/Resources/prefix"
 
 # Strip the dosdevices links — wine recreates them on first run, and they
 # may otherwise point at the builder's home directory.
@@ -183,16 +200,17 @@ rm -rf "$WRAPPER/Contents/Resources/prefix/dosdevices"
 #     ^ moderate risk if RIT ever pops an embedded-HTML dialog. Remove this
 #       line if you hit any "Wine wants to install Gecko" prompt at runtime.
 echo "==> Slimming bundle"
-WRAPPER_WINE="$WRAPPER/Contents/Resources/wine"
+INNER_MACOS="$INNER_APP/Contents/MacOS"
+INNER_LIB="$INNER_APP/Contents/lib"
 WRAPPER_PFX="$WRAPPER/Contents/Resources/prefix"
 
 # Strip debug symbols from all Wine binaries
-find "$WRAPPER_WINE/bin" -type f -perm +111 -exec strip -S {} \; 2>/dev/null || true
-find "$WRAPPER_WINE/lib" -type f \( -name '*.dylib' -o -name '*.so' \) \
+find "$INNER_MACOS" -type f -perm +111 -exec strip -S {} \; 2>/dev/null || true
+find "$INNER_LIB"   -type f \( -name '*.dylib' -o -name '*.so' \) \
      -exec strip -S {} \; 2>/dev/null || true
 
 # Wine Mono lives in two places: the bundled engine and the populated prefix
-rm -rf "$WRAPPER_WINE/share/wine/mono" \
+rm -rf "$INNER_APP/Contents/share/wine/mono" \
        "$WRAPPER_PFX/drive_c/windows/Microsoft.NET/assembly/Wine-Mono" 2>/dev/null || true
 
 # Wine Gecko — KEEP. Removing it breaks .NET 4.8 ClickOnce launchers like
@@ -201,32 +219,98 @@ rm -rf "$WRAPPER_WINE/share/wine/mono" \
 # (Saves ~80 MB if removed; not worth the broken install.)
 
 # Wine's bundled docs/man/info pages are pointless in a shipped bundle
-rm -rf "$WRAPPER_WINE/share/man" "$WRAPPER_WINE/share/info" "$WRAPPER_WINE/share/doc" 2>/dev/null || true
+rm -rf "$INNER_APP/Contents/share/man" \
+       "$INNER_APP/Contents/share/info" \
+       "$INNER_APP/Contents/share/doc" 2>/dev/null || true
 
 echo "    bundle size after slim: $(du -sh "$WRAPPER" | cut -f1)"
 
-# Launcher — bash script (the experimental Cocoa launcher in launcher.m
-# regressed: dfsvc/ClickOnce recovery stopped working when wine was
-# spawned via posix_spawn-with-new-pgroup from an NSApp host, and we lost
-# the ability for wine to find a GUI context properly. Keep launcher.m
-# in the repo for future iteration but ship bash for now.
+# Inner .app's Info.plist + icon — what macOS reads to label every wine
+# child process in the Dock and Force Quit list.
+cp "$HERE/RIT.iconset" -R "$INNER_APP/Contents/Resources/RIT.iconset" 2>/dev/null || true
+cat > "$INNER_APP/Contents/Info.plist" <<EOPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>     <string>wine64-preloader</string>
+    <key>CFBundleIdentifier</key>     <string>com.rotman.rit.engine</string>
+    <key>CFBundleName</key>           <string>RIT</string>
+    <key>CFBundleDisplayName</key>    <string>RIT</string>
+    <key>CFBundleVersion</key>        <string>1</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundlePackageType</key>    <string>APPL</string>
+    <key>CFBundleSignature</key>      <string>????</string>
+    <key>CFBundleIconFile</key>       <string>RIT</string>
+    <key>NSPrincipalClass</key>       <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <!-- LSUIElement=true: every wine child process starts as Accessory
+         (no Dock entry). wine's cocoa driver explicitly upgrades to
+         Regular via setActivationPolicy: when it opens a window, so
+         only Client.exe (and briefly dfsvc.exe — killed by the launcher
+         once Client.exe is up) ever appears in the Dock. -->
+    <key>LSUIElement</key><true/>
+</dict>
+</plist>
+EOPLIST
+
+# Bash launcher
 cat > "$WRAPPER/Contents/MacOS/RIT" <<'EOSH'
 #!/bin/bash
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_RES="$HERE/../Resources"
+INNER="$APP_RES/wine/RIT.app/Contents"
 export WINEPREFIX="$APP_RES/prefix"
 export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
-export PATH="$APP_RES/wine/bin:$PATH"
-export DYLD_FALLBACK_LIBRARY_PATH="$APP_RES/wine/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
-WINEBIN="$APP_RES/wine/bin/wine64"
-[ -x "$WINEBIN" ] || WINEBIN="$APP_RES/wine/bin/wine"
+export PATH="$INNER/MacOS:$PATH"
+export DYLD_FALLBACK_LIBRARY_PATH="$INNER/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+WINEBIN="$INNER/MacOS/wine64"
+[ -x "$WINEBIN" ] || WINEBIN="$INNER/MacOS/wine"
+
+# Reap stragglers from the previous session: macOS Cmd-Q kills Client.exe
+# but wineserver and the wine system daemons (services, svchost, etc.)
+# keep running. The next launch then races them — sometimes attaching to
+# a half-dead wineserver, sometimes failing outright. -k tells wineserver
+# to shut itself + all its children down cleanly.
+if [ -x "$INNER/MacOS/wineserver" ]; then
+    "$INNER/MacOS/wineserver" -k 2>/dev/null || true
+fi
+pkill -f "$APP_RES/wine/RIT.app/Contents/MacOS/wine64-preloader" 2>/dev/null || true
+sleep 1
+
 if [ ! -d "$WINEPREFIX/dosdevices" ]; then
     mkdir -p "$WINEPREFIX/dosdevices"
     ln -sfn '../drive_c' "$WINEPREFIX/dosdevices/c:"
     ln -sfn '/'          "$WINEPREFIX/dosdevices/z:"
 fi
-trap '"$APP_RES/wine/bin/wineserver" -k 2>/dev/null || true' EXIT
+
+# Single-Dock-icon: dfsvc.exe (the .NET ClickOnce service) gets a Dock
+# entry alongside Client.exe during launch. dfsvc is only needed during
+# ClickOnce activation; once Client.exe's window is up, dfsvc is dormant
+# and we can safely kill it. Signal: Client.exe transitions to "Foreground"
+# in LaunchServices when its window is rendered (around T+10s on M1).
+(
+    for _ in $(seq 1 60); do
+        CLIENT=$(pgrep -f 'Client\.exe' | head -1)
+        if [ -n "$CLIENT" ]; then
+            for _ in $(seq 1 30); do
+                if /usr/bin/lsappinfo info -app "$CLIENT" 2>/dev/null \
+                     | grep -qF 'type="Foreground"'; then
+                    sleep 1
+                    pkill -f 'Microsoft.NET.*\\dfsvc\.exe' 2>/dev/null
+                    exit 0
+                fi
+                sleep 1
+            done
+            # Foreground signal never came — kill anyway after 30s of waiting
+            pkill -f 'Microsoft.NET.*\\dfsvc\.exe' 2>/dev/null
+            exit 0
+        fi
+        sleep 1
+    done
+) &
+
 exec "$WINEBIN" start "C:\\Client.application"
 EOSH
 chmod +x "$WRAPPER/Contents/MacOS/RIT"
@@ -235,6 +319,9 @@ chmod +x "$WRAPPER/Contents/MacOS/RIT"
 # RIT.iconset/). iconutil is built into macOS.
 echo "==> Compiling icon"
 iconutil --convert icns "$HERE/RIT.iconset" -o "$WRAPPER/Contents/Resources/RIT.icns"
+# Duplicate into the inner .app so wine processes show the RIT icon in Dock.
+cp "$WRAPPER/Contents/Resources/RIT.icns" "$INNER_APP/Contents/Resources/RIT.icns"
+rm -rf "$INNER_APP/Contents/Resources/RIT.iconset" 2>/dev/null || true
 
 # Info.plist. Note CFBundleIconFile + LSMinimumSystemVersion = 14 (Sonoma,
 # GPTK's floor). NSPrincipalClass is set so wine's NSApp inherits our bundle
