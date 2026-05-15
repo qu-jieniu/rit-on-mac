@@ -97,6 +97,18 @@ jobs:
           set -euxo pipefail
           arch -x86_64 "$X86_BREW" tap apple/apple https://github.com/apple/homebrew-apple
 
+      - name: Patch Apple formula — openssl@1.1 → openssl@3 (1.1 deprecated/removed)
+        run: |
+          set -euxo pipefail
+          # Apple's formula was last updated in 2023 and depends on openssl@1.1,
+          # which Homebrew has since removed. We swap it to openssl@3 (ABI-compatible
+          # enough for wine 7.7's needs — wine uses gnutls primarily, openssl is for
+          # secondary things). If something breaks, the smoke test will catch it.
+          FORMULA=/usr/local/Library/Taps/apple/homebrew-apple/Formula/game-porting-toolkit.rb
+          [ -f "$FORMULA" ] || { echo "::error::formula not found at $FORMULA"; find /usr/local -name 'game-porting-toolkit.rb' 2>/dev/null; exit 1; }
+          /usr/bin/sed -i '' 's|"openssl@1.1"|"openssl@3"|g' "$FORMULA"
+          grep -E 'openssl' "$FORMULA" | head
+
       - name: Install GPTK (~30-45 min — builds CodeWeavers' clang then wine)
         run: |
           set -euxo pipefail
