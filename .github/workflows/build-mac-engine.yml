@@ -87,7 +87,10 @@ jobs:
               "NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
           fi
           arch -x86_64 "$X86_BREW" --version
-          arch -x86_64 "$X86_BREW" config | head -10
+          # `brew config | head` triggers SIGPIPE → set -o pipefail fails the
+          # step. Capture full output then grep instead.
+          arch -x86_64 "$X86_BREW" config > /tmp/brew-config.txt 2>&1 || true
+          grep -E "^(HOMEBREW_VERSION|HOMEBREW_PREFIX|HOMEBREW_CELLAR|HEAD)" /tmp/brew-config.txt || true
 
       - name: Tap apple/apple
         run: |
