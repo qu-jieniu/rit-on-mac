@@ -1,0 +1,169 @@
+name: Build Wine engine (self-hosted GPTK)
+
+# Build our own GPTK binary on macos-14 using Apple's official Homebrew formula.
+# This eliminates the Gcenx middleman: we go straight from the public CrossOver
+# source + Apple's public Homebrew tap to a vendored .tar.xz on our own releases.
+#
+# Why macos-14 specifically:
+#   Apple's game-porting-toolkit-compiler is clang-8.0 with CodeWeavers patches.
+#   Clang 8 segfaults parsing macOS Tahoe 26.x SDK headers (verified locally).
+#   Apple's own formula has `depends_on macos: ">= :sonoma"` for the same reason.
+#   macos-14 (Sonoma) is GitHub Actions' last runner with a SDK clang 8 can parse.
+#
+# Triggers:
+#   - workflow_dispatch (manual): for first test + ad-hoc rebuilds
+#   - workflow_call: from auto-mirror-engine.yml when CrossOver source URL changes
+#
+# Output:
+#   - vendored-selfhost-<version> release on this repo
+#   - Asset: game-porting-toolkit-selfhost-<version>.tar.xz
+#     Layout matches Gcenx's: Game Porting Toolkit.app/Contents/Resources/wine/{bin,lib,share}
+
+"on":
+  workflow_dispatch:
+    inputs:
+      cx_source_url:
+        description: 'CrossOver source tarball URL (must match what Apples formula expects)'
+        type: string
+        default: 'https://media.codeweavers.com/pub/crossover/source/crossover-sources-22.1.1.tar.gz'
+      version_tag:
+        description: 'Version tag for our release (used as vendored-selfhost-<TAG>)'
+        type: string
+        default: '1.1'
+  workflow_call:
+    inputs:
+      cx_source_url:
+        type: string
+        required: true
+      version_tag:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build GPTK on macos-14
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="vendored-selfhost-${{ inputs.version_tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release $TAG already exists — will overwrite asset"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tap apple/apple
+        run: brew tap apple/apple https://github.com/apple/homebrew-apple
+
+      - name: Install GPTK (this builds CodeWeavers' clang + wine — ~30-45 min)
+        run: |
+          # Apple's formula downloads CrossOver source from media.codeweavers.com,
+          # builds a clang-8 fork from it, then builds wine with that clang.
+          # No Apple Developer auth required — the Apple formula and CrossOver
+          # source are both public.
+          brew install --quiet apple/apple/game-porting-toolkit 2>&1 | tail -50
+
+      - name: Locate built wine
+        id: locate
+        run: |
+          set -euo pipefail
+          GPTK_PREFIX=$(brew --prefix game-porting-toolkit)
+          echo "GPTK installed at: $GPTK_PREFIX"
+          ls -la "$GPTK_PREFIX/bin" | head
+          echo "wine_root=$GPTK_PREFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Package as .tar.xz matching Gcenx layout
+        run: |
+          set -euo pipefail
+          # Gcenx ships: Game Porting Toolkit.app/Contents/Resources/wine/{bin,lib,share}
+          STAGING=$RUNNER_TEMP/staging
+          BUNDLE="$STAGING/Game Porting Toolkit.app/Contents/Resources/wine"
+          mkdir -p "$BUNDLE"
+          
+          GPTK_PREFIX="${{ steps.locate.outputs.wine_root }}"
+          
+          # Brew installs wine with bin/lib/share at the formula prefix root
+          for dir in bin lib share; do
+            if [ -d "$GPTK_PREFIX/$dir" ]; then
+              cp -R "$GPTK_PREFIX/$dir" "$BUNDLE/"
+            fi
+          done
+          
+          # Sanity check
+          [ -x "$BUNDLE/bin/wine64" ] || [ -x "$BUNDLE/bin/wine" ] || {
+            echo "::error::No wine binary found in built bundle"
+            ls -R "$BUNDLE"
+            exit 1
+          }
+          
+          # Minimal Info.plist so it looks like a real bundle
+          cat > "$STAGING/Game Porting Toolkit.app/Contents/Info.plist" <<EOPLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleIdentifier</key><string>com.rotman.rit.gptk-selfhost</string>
+              <key>CFBundleName</key><string>Game Porting Toolkit</string>
+              <key>CFBundleVersion</key><string>${{ inputs.version_tag }}</string>
+              <key>CFBundleShortVersionString</key><string>${{ inputs.version_tag }}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>LSMinimumSystemVersion</key><string>14.0</string>
+          </dict>
+          </plist>
+          EOPLIST
+          
+          ASSET_NAME="game-porting-toolkit-selfhost-${{ inputs.version_tag }}.tar.xz"
+          tar -cJf "$RUNNER_TEMP/$ASSET_NAME" -C "$STAGING" "Game Porting Toolkit.app"
+          ls -lh "$RUNNER_TEMP/$ASSET_NAME"
+          echo "ASSET_PATH=$RUNNER_TEMP/$ASSET_NAME" >> $GITHUB_ENV
+          echo "ASSET_NAME=$ASSET_NAME" >> $GITHUB_ENV
+
+      - name: Smoke test — wine64 --version
+        run: |
+          set -euo pipefail
+          # Quick sanity check that the binary actually runs
+          tar -tJf "$ASSET_PATH" | head -5
+          mkdir -p /tmp/smoke
+          tar -xJf "$ASSET_PATH" -C /tmp/smoke
+          WB=$(find /tmp/smoke -name wine64 -path '*MacOS*' -o -name wine64 -path '*bin*' | head -1)
+          [ -x "$WB" ] || { echo "::error::wine64 not found"; exit 1; }
+          "$WB" --version
+          echo "::notice::Smoke test passed: $($WB --version)"
+
+      - name: Upload to vendored-selfhost-<ver> release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="vendored-selfhost-${{ inputs.version_tag }}"
+          
+          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
+            # Release exists; overwrite asset
+            gh release upload "$TAG" "$ASSET_PATH" --clobber
+          else
+            gh release create "$TAG" \
+              --title "Self-built GPTK ${{ inputs.version_tag }}" \
+              --notes "Built by .github/workflows/build-mac-engine.yml on macos-14.
+
+          Source: ${{ inputs.cx_source_url }}
+          Pipeline: brew tap apple/apple → brew install apple/apple/game-porting-toolkit
+          Build host: macos-14 (Sonoma) — clang 8 in CodeWeavers' fork can't parse newer SDKs.
+
+          Identical pipeline to Gcenx's vendored game-porting-toolkit, just self-hosted.
+
+          **Do not edit this release manually** — it is managed by the workflow." \
+              "$ASSET_PATH"
+          fi
