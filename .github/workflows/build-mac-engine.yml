@@ -97,19 +97,31 @@ jobs:
           set -euxo pipefail
           arch -x86_64 "$X86_BREW" tap apple/apple https://github.com/apple/homebrew-apple
 
-      - name: Patch Apple formula — openssl@1.1 → openssl@3 (1.1 deprecated/removed)
+      - name: Patch Apple formulas (drift fixes for 2023-vintage formula on 2026 Homebrew)
         run: |
           set -euxo pipefail
-          # Apple's formula was last updated in 2023 and depends on openssl@1.1,
-          # which Homebrew has since removed. Swap to openssl@3 (ABI-compatible
-          # enough for wine 7.7's secondary openssl uses — wine uses gnutls
-          # primarily for TLS). If smoke test fails, we'll know openssl@3
-          # isn't usable and need a different approach.
-          FORMULA=$(arch -x86_64 "$X86_BREW" formula apple/apple/game-porting-toolkit)
-          echo "Formula at: $FORMULA"
-          [ -f "$FORMULA" ] || { echo "::error::formula path returned by brew not a file: $FORMULA"; exit 1; }
-          /usr/bin/sed -i '' 's|"openssl@1.1"|"openssl@3"|g' "$FORMULA"
-          grep -nE 'openssl' "$FORMULA" || true
+
+          # Issue 1: openssl@1.1 deprecated/removed from Homebrew.
+          # Wine 7.7 uses gnutls for TLS primarily; openssl@3 is ABI-compatible
+          # enough for the secondary uses. Smoke test will catch if not.
+          GPTK_FORMULA=$(arch -x86_64 "$X86_BREW" formula apple/apple/game-porting-toolkit)
+          echo "GPTK formula: $GPTK_FORMULA"
+          [ -f "$GPTK_FORMULA" ] || { echo "::error::not a file: $GPTK_FORMULA"; exit 1; }
+          /usr/bin/sed -i '' 's|"openssl@1.1"|"openssl@3"|g' "$GPTK_FORMULA"
+          grep -nE 'openssl' "$GPTK_FORMULA" || true
+
+          # Issue 2: CMake 4.x removed support for cmake_minimum_required < 3.5.
+          # The CodeWeavers LLVM source has very old cmake_minimum_required values.
+          # Inject -DCMAKE_POLICY_VERSION_MINIMUM=3.5 into the cmake invocation
+          # in game-porting-toolkit-compiler.rb so the configure step accepts
+          # the old policies.
+          COMPILER_FORMULA=$(arch -x86_64 "$X86_BREW" formula apple/apple/game-porting-toolkit-compiler)
+          echo "Compiler formula: $COMPILER_FORMULA"
+          [ -f "$COMPILER_FORMULA" ] || { echo "::error::not a file: $COMPILER_FORMULA"; exit 1; }
+          # The cmake call is: system "cmake", "-G", "Ninja", ...
+          # Insert the policy flag right after the generator.
+          /usr/bin/sed -i '' 's|"cmake", "-G", "Ninja",|"cmake", "-G", "Ninja", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",|' "$COMPILER_FORMULA"
+          grep -n CMAKE_POLICY "$COMPILER_FORMULA" || { echo "::error::cmake patch did not land"; exit 1; }
 
       - name: Install GPTK (~30-45 min — builds CodeWeavers' clang then wine)
         run: |
